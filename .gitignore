@@ -1,3 +1,8 @@
+roo-relay-1.0.0.vsix
 
-mcp.json
-litellm_config.yaml
+*.env
+
+package-lock.json
+
+node_modules/
+dist/
