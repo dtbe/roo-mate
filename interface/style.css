@@ -1,0 +1,47 @@
+body {
+    background-color: black;
+    color: white;
+    font-family: 'Courier New', Courier, monospace;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    box-sizing: border-box;
+}
+
+#terminal {
+    width: 80%;
+    max-width: 800px;
+    border: 2px solid #0f0; /* Green border for retro feel */
+    padding: 20px;
+    box-shadow: 0 0 15px rgba(0, 255, 0, 0.7); /* Green glow */
+    background-color: rgba(0, 0, 0, 0.8); /* Slightly transparent background */
+}
+
+#output {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin-bottom: 10px;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+
+.prompt-line {
+    display: flex;
+}
+
+.prompt {
+    color: #0f0; /* Green prompt text */
+    margin-right: 5px;
+}
+
+#input {
+    background-color: transparent;
+    border: none;
+    color: white;
+    flex-grow: 1;
+    outline: none;
+    caret-color: #0f0; /* Green cursor */
+}
