@@ -8,8 +8,9 @@ dotenv.config();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const PRIVATE_CHANNEL_ID = process.env.PRIVATE_CHANNEL_ID; // Optional: for a specific private channel
 const PUBLIC_CHANNEL_ID = process.env.PUBLIC_CHANNEL_ID;   // Optional: for a specific public channel
-const LOG_FILE_PATH = path.join(__dirname, '..', 'discord_messages.jsonl');
-const WATCHED_FILE_PATH = path.join(__dirname, '..', 'roo_code_input.json');
+const BASE_PATH = process.env.USER_HOME_DIR || 'c:/Users/dan/Home'; // Use USER_HOME_DIR from .env or default
+const LOG_FILE_PATH = path.join(BASE_PATH, '00-Repositories', '00', 'roo-mate', 'discord-logger', 'discord_messages.jsonl');
+const WATCHED_FILE_PATH = path.join(BASE_PATH, '00-Repositories', '00', 'roo-mate', 'discord-logger', 'roo_code_input.json');
 
 const client = new Client({
   intents: [
