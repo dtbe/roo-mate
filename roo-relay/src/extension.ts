@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as path from 'path';
+import * as path from 'path'; 
 import { EventEmitter } from 'events';
 
 // Re-defining RooCodeEvents and RooCodeEventName based on roo-code.ts for self-containment
@@ -21,6 +21,7 @@ export type RooCodeEvents = {
                 conversationHistoryIndex?: number;
                 checkpoint?: { [x: string]: unknown; };
                 progressStatus?: { icon?: string; text?: string; };
+                choices?: { label: string; value: string; }[]; // Add choices for ask messages
             };
         },
     ];
@@ -76,6 +77,8 @@ interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
   sendMessage(text?: string, images?: string[]): Promise<void>;
   cancelCurrentTask(): Promise<void>;
   getConfiguration(): any; // Should be RooCodeSettings from roo-code.ts
+  handleModeSwitch(mode: string): Promise<void>; // Add handleModeSwitch
+  handleWebviewAskResponse(askResponse: any, text?: string, images?: string[]): Promise<void>; // Add handleWebviewAskResponse
   // Add other methods from RooCodeAPI as needed
 }
 
@@ -227,7 +230,7 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   // Watch the file for changes
-  fs.watch(WATCHED_FILE_PATH, async (eventType, filename) => {
+  fs.watch(WATCHED_FILE_PATH, async (eventType: fs.WatchEventType, filename: string | null) => { // Corrected filename type
     if (eventType === 'change') {
       console.log(`Watched file changed: ${filename}`);
       try {
@@ -256,6 +259,36 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(`Terminal reset.`);
             return;
         }
+
+        if (payload.command === '/mode') {
+            const modeSlug = payload.mode;
+            try {
+                await rooCodeApi.handleModeSwitch(modeSlug);
+                vscode.window.showInformationMessage(`Mode changed to '${modeSlug}'.`);
+            } catch (error: unknown) {
+                if (error instanceof Error) {
+                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': ${error.message}`);
+                } else {
+                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': An unknown error occurred.`);
+                }
+            }
+            return;
+        }
+
+        // Handle askResponse from web terminal
+        if (payload.command === '/askResponse') {
+            if (activeTaskId && rooCodeApi.handleWebviewAskResponse) {
+                const askResponse = payload.askResponse;
+                const text = payload.text;
+                const images = payload.images;
+                await rooCodeApi.handleWebviewAskResponse(askResponse, text, images);
+                vscode.window.showInformationMessage(`Response sent to Roo Code API.`);
+            } else {
+                vscode.window.showErrorMessage(`Cannot send ask response: no active task or API not ready.`);
+            }
+            return;
+        }
+
 
         if (activeTaskId) {
             await rooCodeApi.sendMessage(payload.command);
@@ -294,18 +327,29 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage(`New task started! Task ID: ${activeTaskId}`);
             
             const messageHandler = (event: any) => {
-                if (event.taskId === activeTaskId && event.message.type === 'say' && event.message.say === 'completion_result') {
-                    const llmResponse = event.message.text;
-                    if (llmResponse) {
-                        let existingResponses: { messages: any[] } = { messages: [] };
-                        try {
-                            const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
-                            existingResponses = JSON.parse(responsesContent);
-                        } catch (readError) {
-                            console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
+                if (event.taskId === activeTaskId) {
+                    let existingResponses: { messages: any[] } = { messages: [] };
+                    try {
+                        const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
+                        existingResponses = JSON.parse(responsesContent);
+                    } catch (readError) {
+                        console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
+                    }
+
+                    if (event.message.type === 'say' && event.message.say === 'completion_result') {
+                        const llmResponse = event.message.text;
+                        if (llmResponse) {
+                            existingResponses.messages.push({ type: 'say', content: llmResponse });
+                            fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
                         }
-                        
-                        existingResponses.messages.push(llmResponse);
+                    } else if (event.message.type === 'ask') {
+                        const askMessage = {
+                            type: 'ask',
+                            text: event.message.text,
+                            choices: event.message.choices,
+                            askType: event.message.ask,
+                        };
+                        existingResponses.messages.push(askMessage);
                         fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
                     }
                 }

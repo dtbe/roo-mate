@@ -10,6 +10,13 @@ document.addEventListener('DOMContentLoaded', () => {
         outputDiv.scrollTop = outputDiv.scrollHeight; // Auto-scroll to bottom
     }
 
+    function appendHtml(html) {
+        const div = document.createElement('div');
+        div.innerHTML = html;
+        outputDiv.appendChild(div);
+        outputDiv.scrollTop = outputDiv.scrollHeight; // Auto-scroll to bottom
+    }
+
     function clearOutput() {
         outputDiv.innerHTML = '';
     }
@@ -24,13 +31,19 @@ document.addEventListener('DOMContentLoaded', () => {
         appendMessage(`¶:/ > ${command}`); // Echo command to output
         inputField.value = ''; // Clear input
 
+        let payload = { command: command };
+        if (command.startsWith('/mode ')) {
+            const modeSlug = command.substring(6).trim();
+            payload = { command: '/mode', mode: modeSlug };
+        }
+
         try {
             const response = await fetch('/command', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ command: command }),
+                body: JSON.stringify(payload),
             });
             const data = await response.json();
             appendMessage(data.response);
@@ -39,6 +52,31 @@ document.addEventListener('DOMContentLoaded', () => {
             appendMessage('Error: Could not connect to server.');
         }
     }
+
+    async function sendAskResponse(askResponse, text, images = []) {
+        const payload = {
+            command: '/askResponse',
+            askResponse: askResponse,
+            text: text,
+            images: images
+        };
+
+        try {
+            const response = await fetch('/command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            appendMessage(data.response);
+        } catch (error) {
+            console.error('Error sending ask response:', error);
+            appendMessage('Error: Could not send response to server.');
+        }
+    }
+
 
     inputField.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -61,7 +99,29 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.messages && data.messages.length > lastMessageCount) {
                 const newMessages = data.messages.slice(lastMessageCount);
                 newMessages.forEach(msg => {
-                    appendMessage(`[SERVER]: ${msg}`);
+                    if (typeof msg === 'object' && msg.type === 'ask') {
+                        let askHtml = `[SERVER ASK]: ${msg.text}<br>`;
+                        if (msg.choices && msg.choices.length > 0) {
+                            askHtml += '<ul>';
+                            msg.choices.forEach(choice => {
+                                askHtml += `<li><button class="ask-choice-button" data-value="${choice.value}">${choice.label}</button></li>`;
+                            });
+                            askHtml += '</ul>';
+                        }
+                        appendHtml(askHtml);
+
+                        // Add event listeners to the new buttons
+                        outputDiv.querySelectorAll('.ask-choice-button').forEach(button => {
+                            button.onclick = () => {
+                                sendAskResponse(button.dataset.value, button.innerText);
+                            };
+                        });
+
+                    } else if (typeof msg === 'object' && msg.type === 'say') {
+                        appendMessage(`[SERVER]: ${msg.content}`);
+                    } else {
+                        appendMessage(`[SERVER]: ${msg}`);
+                    }
                 });
                 lastMessageCount = data.messages.length;
             } else if (data.messages && data.messages.length < lastMessageCount) {
@@ -69,7 +129,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 clearOutput();
                 appendMessage('Holo-Suite Terminal v1.0');
                 appendMessage('Type "help" for a list of commands.');
-                data.messages.forEach(msg => appendMessage(`[SERVER]: ${msg}`));
+                data.messages.forEach(msg => {
+                    if (typeof msg === 'object' && msg.type === 'ask') {
+                        let askHtml = `[SERVER ASK]: ${msg.text}<br>`;
+                        if (msg.choices && msg.choices.length > 0) {
+                            askHtml += '<ul>';
+                            msg.choices.forEach(choice => {
+                                askHtml += `<li><button class="ask-choice-button" data-value="${choice.value}">${choice.label}</button></li>`;
+                            });
+                            askHtml += '</ul>';
+                        }
+                        appendHtml(askHtml);
+                        outputDiv.querySelectorAll('.ask-choice-button').forEach(button => {
+                            button.onclick = () => {
+                                sendAskResponse(button.dataset.value, button.innerText);
+                            };
+                        });
+                    } else if (typeof msg === 'object' && msg.type === 'say') {
+                        appendMessage(`[SERVER]: ${msg.content}`);
+                    } else {
+                        appendMessage(`[SERVER]: ${msg}`);
+                    }
+                });
                 lastMessageCount = data.messages.length;
             }
         } catch (error) {

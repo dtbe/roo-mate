@@ -49,10 +49,14 @@ class TerminalHandler(SimpleHTTPRequestHandler):
             try:
                 payload = json.loads(body or b"{}")
                 cmd = payload.get('command', '')
+                mode_slug = payload.get('mode') # Get mode slug if present
 
-                # Write command to commands.json
+                # Write command and mode_slug (if any) to commands.json
                 with open(COMMANDS_FILE, 'a') as f:
-                    json.dump({'command': cmd, 'timestamp': time.time()}, f)
+                    command_data = {'command': cmd, 'timestamp': time.time()}
+                    if mode_slug:
+                        command_data['mode'] = mode_slug
+                    json.dump(command_data, f)
                     f.write('\n')
 
                 if cmd == '/reset':
@@ -60,6 +64,8 @@ class TerminalHandler(SimpleHTTPRequestHandler):
                     with open(RESPONSES_FILE, 'w') as f:
                         json.dump({"messages": []}, f)
                     response_text = "Terminal reset."
+                elif cmd == '/mode':
+                    response_text = f"Mode change request for '{mode_slug}' acknowledged."
                 else:
                     response_text = f"Acknowledged command → {cmd}. Waiting for LLM response..."
                 
