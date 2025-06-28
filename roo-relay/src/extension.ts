@@ -77,7 +77,6 @@ interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
   sendMessage(text?: string, images?: string[]): Promise<void>;
   cancelCurrentTask(): Promise<void>;
   getConfiguration(): any; // Should be RooCodeSettings from roo-code.ts
-  handleModeSwitch(mode: string): Promise<void>; // Add handleModeSwitch
   handleWebviewAskResponse(askResponse: any, text?: string, images?: string[]): Promise<void>; // Add handleWebviewAskResponse
   // Add other methods from RooCodeAPI as needed
 }
@@ -87,6 +86,7 @@ const WATCHED_FILE_PATH = path.join(vscode.workspace.rootPath || '', '00-Reposit
 const WEB_TERMINAL_RESPONSES_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'responses.json');
 
 let activeTaskId: string | null = null;
+let messageHandlerRegistered: boolean = false;
 
 // Helper function to get Roo Code API
 function getRooCodeApi(): RooCodeAPI | undefined {
@@ -251,19 +251,24 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        if (payload.command === '/reset') {
+        if (payload.command === '.reset') {
             if (activeTaskId) {
                 await rooCodeApi.cancelCurrentTask();
-                activeTaskId = null;
+                activeTaskId = null; // Reset for a clean start
             }
+            messageHandlerRegistered = false;
             vscode.window.showInformationMessage(`Terminal reset.`);
             return;
         }
 
-        if (payload.command === '/mode') {
+        if (payload.command === '.mode') {
             const modeSlug = payload.mode;
             try {
-                await rooCodeApi.handleModeSwitch(modeSlug);
+                // Send mode change message using the same format as the UI
+                await rooCodeApi.sendMessage(JSON.stringify({
+                    type: "mode",
+                    text: modeSlug,
+                }));
                 vscode.window.showInformationMessage(`Mode changed to '${modeSlug}'.`);
             } catch (error: unknown) {
                 if (error instanceof Error) {
@@ -326,47 +331,53 @@ export function activate(context: vscode.ExtensionContext) {
     
             vscode.window.showInformationMessage(`New task started! Task ID: ${activeTaskId}`);
             
-            const messageHandler = (event: any) => {
-                if (event.taskId === activeTaskId) {
-                    let existingResponses: { messages: any[] } = { messages: [] };
-                    try {
-                        const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
-                        existingResponses = JSON.parse(responsesContent);
-                    } catch (readError) {
-                        console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
-                    }
+            // Only register message handler if not already registered
+            if (!messageHandlerRegistered) {
+                const messageHandler = (event: any) => {
+                    if (event.taskId === activeTaskId) {
+                        let existingResponses: { messages: any[] } = { messages: [] };
+                        try {
+                            const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
+                            existingResponses = JSON.parse(responsesContent);
+                        } catch (readError) {
+                            console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
+                        }
 
-                    if (event.message.type === 'say' && event.message.say === 'completion_result') {
-                        const llmResponse = event.message.text;
-                        if (llmResponse) {
-                            existingResponses.messages.push({ type: 'say', content: llmResponse });
+                        if (event.message.type === 'say' && event.message.say === 'completion_result') {
+                            const llmResponse = event.message.text;
+                            if (llmResponse) {
+                                existingResponses.messages.push({ type: 'say', content: llmResponse });
+                                fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
+                            }
+                        } else if (event.message.type === 'ask') {
+                            const askMessage = {
+                                type: 'ask',
+                                text: event.message.text,
+                                choices: event.message.choices,
+                                askType: event.message.ask,
+                            };
+                            existingResponses.messages.push(askMessage);
                             fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
                         }
-                    } else if (event.message.type === 'ask') {
-                        const askMessage = {
-                            type: 'ask',
-                            text: event.message.text,
-                            choices: event.message.choices,
-                            askType: event.message.ask,
-                        };
-                        existingResponses.messages.push(askMessage);
-                        fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
                     }
-                }
-            };
-            rooCodeApi.on(RooCodeEventName.Message, messageHandler);
+                };
+                rooCodeApi.on(RooCodeEventName.Message, messageHandler);
+                messageHandlerRegistered = true;
 
-            const completionHandler = (completedTaskId: string) => {
-                if (completedTaskId === activeTaskId) {
-                    activeTaskId = null;
-                    rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler);
-                    rooCodeApi.off(RooCodeEventName.Message, messageHandler);
-                }
-            };
-            rooCodeApi.on(RooCodeEventName.TaskCompleted, completionHandler);
+                const completionHandler = (completedTaskId: string) => {
+                    if (completedTaskId === activeTaskId) {
+                        // Don't reset activeTaskId to maintain conversation continuity
+                        // Only remove event listeners to prevent memory leaks
+                        messageHandlerRegistered = false;
+                        rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler);
+                        rooCodeApi.off(RooCodeEventName.Message, messageHandler);
+                    }
+                };
+                rooCodeApi.on(RooCodeEventName.TaskCompleted, completionHandler);
 
-            context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.Message, messageHandler)));
-            context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler)));
+                context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.Message, messageHandler)));
+                context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler)));
+            }
         }
 
       } catch (error) {

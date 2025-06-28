@@ -1,3 +1,5 @@
+see  Roo-Code\webview-ui
+
 # Web Interface API Integration Plan
 
 This document outlines a strategic plan for evolving the current web interface into a robust, extensible, and user-friendly platform that can serve as a foundation for both mobile access and custom wrappers, while maintaining consistent conventions.

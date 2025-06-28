@@ -22,7 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function sendCommand(command) {
-        if (command === '/reset') {
+        if (command === '.reset') {
             clearOutput();
             appendMessage('Terminal has been reset.');
             lastMessageCount = 0; // Reset message count
@@ -32,9 +32,9 @@ document.addEventListener('DOMContentLoaded', () => {
         inputField.value = ''; // Clear input
 
         let payload = { command: command };
-        if (command.startsWith('/mode ')) {
+        if (command.startsWith('.mode ')) {
             const modeSlug = command.substring(6).trim();
-            payload = { command: '/mode', mode: modeSlug };
+            payload = { command: '.mode', mode: modeSlug };
         }
 
         try {
