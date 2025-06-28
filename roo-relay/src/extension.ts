@@ -73,6 +73,8 @@ export enum RooCodeEventName {
 // Assuming Roo Code API is exposed via an extension export
 interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
   startNewTask(options: { configuration?: any; text?: string; images?: string[] }): Promise<string>;
+  sendMessage(text?: string, images?: string[]): Promise<void>;
+  cancelCurrentTask(): Promise<void>;
   getConfiguration(): any; // Should be RooCodeSettings from roo-code.ts
   // Add other methods from RooCodeAPI as needed
 }
@@ -80,6 +82,8 @@ interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
 // Path to the watched file
 const WATCHED_FILE_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'commands.json');
 const WEB_TERMINAL_RESPONSES_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'responses.json');
+
+let activeTaskId: string | null = null;
 
 // Helper function to get Roo Code API
 function getRooCodeApi(): RooCodeAPI | undefined {
@@ -244,96 +248,79 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        let taskInstructions: string;
-        let updatedConfig: any;
-        let source: 'discord' | 'web-terminal';
-        let taskId: string; // To store the taskId for event listening
-
-        // Determine source based on payload structure
-        if (payload.discord) {
-            source = 'discord';
-            const instructionBuilder = new MessageInstructionBuilder()
-                .addHeader(payload, source)
-                .addHistory(payload.discord.recentMessages, source)
-                .addInstructions(source)
-                .addMessage(payload.discord.messageContent)
-                .addOptionalTts(payload.discord.ttsRequested);
-            taskInstructions = instructionBuilder.toString();
-            updatedConfig = {
-                ...rooCodeApi.getConfiguration(),
-                mode: 'ask',
-                discordContext: {
-                    channelId: payload.discord.channelId,
-                    channelName: payload.discord.channelName,
-                    authorId: payload.discord.authorId,
-                    authorUsername: payload.discord.authorUsername,
-                    messageContent: payload.discord.messageContent,
-                    ttsRequested: payload.discord.ttsRequested,
-                }
-            };
-        } else if (payload.command) { // Assuming web terminal payload has a 'command' field
-            source = 'web-terminal';
-            const instructionBuilder = new MessageInstructionBuilder()
-                .addHeader(payload, source)
-                .addHistory([], source) // No history for web terminal for now
-                .addInstructions(source)
-                .addMessage(payload.command);
-            taskInstructions = instructionBuilder.toString();
-            updatedConfig = {
-                ...rooCodeApi.getConfiguration(),
-                mode: 'ask', // Or a new mode for web terminal interactions
-                webTerminalContext: { // Pass web terminal context
-                    command: payload.command,
-                    timestamp: payload.timestamp,
-                }
-            };
-        } else {
-            console.warn('Unknown payload format in watched file:', payload);
+        if (payload.command === '/reset') {
+            if (activeTaskId) {
+                await rooCodeApi.cancelCurrentTask();
+                activeTaskId = null;
+            }
+            vscode.window.showInformationMessage(`Terminal reset.`);
             return;
         }
 
-        // Start a new task with the constructed instructions and configuration
-        taskId = await rooCodeApi.startNewTask({
-            configuration: updatedConfig,
-            text: taskInstructions
-        });
-
-        vscode.window.showInformationMessage(`Roo Code LLM triggered with ${source} message! Task ID: ${taskId}`);
-
-        // Listen for messages from this specific task
-        if (source === 'web-terminal') {
+        if (activeTaskId) {
+            await rooCodeApi.sendMessage(payload.command);
+            vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
+        } else {
+            let taskInstructions: string;
+            let updatedConfig: any;
+            let source: 'discord' | 'web-terminal';
+    
+            if (payload.command) {
+                source = 'web-terminal';
+                const instructionBuilder = new MessageInstructionBuilder()
+                    .addHeader(payload, source)
+                    .addHistory([], source) 
+                    .addInstructions(source)
+                    .addMessage(payload.command);
+                taskInstructions = instructionBuilder.toString();
+                updatedConfig = {
+                    ...rooCodeApi.getConfiguration(),
+                    mode: 'ask', 
+                    webTerminalContext: { 
+                        command: payload.command,
+                        timestamp: payload.timestamp,
+                    }
+                };
+            } else {
+                console.warn('Unknown payload format in watched file:', payload);
+                return;
+            }
+    
+            activeTaskId = await rooCodeApi.startNewTask({
+                configuration: updatedConfig,
+                text: taskInstructions
+            });
+    
+            vscode.window.showInformationMessage(`New task started! Task ID: ${activeTaskId}`);
+            
             const messageHandler = (event: any) => {
-                if (event.taskId === taskId && event.message.type === 'say' && event.message.say === 'completion_result') {
+                if (event.taskId === activeTaskId && event.message.type === 'say' && event.message.say === 'completion_result') {
                     const llmResponse = event.message.text;
                     if (llmResponse) {
-                        // Read existing responses, append new one, and write back
-                        let existingResponses: { messages: string[] } = { messages: [] };
+                        let existingResponses: { messages: any[] } = { messages: [] };
                         try {
                             const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
                             existingResponses = JSON.parse(responsesContent);
                         } catch (readError) {
                             console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
                         }
+                        
                         existingResponses.messages.push(llmResponse);
                         fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
-                        vscode.window.showInformationMessage(`LLM response written to responses.json for task ${taskId}`);
                     }
-                    // Remove this specific listener once the response is received
-                    rooCodeApi.off(RooCodeEventName.Message, messageHandler);
                 }
             };
             rooCodeApi.on(RooCodeEventName.Message, messageHandler);
 
             const completionHandler = (completedTaskId: string) => {
-                if (completedTaskId === taskId) {
-                    // Remove this specific listener once the task is completed
+                if (completedTaskId === activeTaskId) {
+                    activeTaskId = null;
                     rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler);
-                    rooCodeApi.off(RooCodeEventName.Message, messageHandler); // Ensure message listener is also removed
+                    rooCodeApi.off(RooCodeEventName.Message, messageHandler);
                 }
             };
             rooCodeApi.on(RooCodeEventName.TaskCompleted, completionHandler);
 
-            // Add these handlers to context.subscriptions so they are disposed on extension deactivation
             context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.Message, messageHandler)));
             context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler)));
         }

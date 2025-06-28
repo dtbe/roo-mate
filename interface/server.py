@@ -1,9 +1,7 @@
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 import json
-import subprocess
-import sys
 import os
-from urllib.parse import urlparse, parse_qs
+import time
 
 PORT = 8000
 COMMANDS_FILE = 'commands.json'
@@ -20,10 +18,20 @@ class TerminalHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content.encode())
             except FileNotFoundError:
-                self.send_error(404, 'responses.json not found')
+                # If responses.json is not found, create it with an empty messages array
+                with open(RESPONSES_FILE, 'w') as f:
+                    json.dump({"messages": []}, f)
+                # Then, re-read and serve it
+                with open(RESPONSES_FILE, 'r') as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(content.encode())
             except Exception as e:
                 self.send_error(500, f'Error reading responses.json: {e}')
         else:
+            # Serve files from the current directory
             super().do_GET()
 
     def _send_json(self, data):
@@ -44,20 +52,24 @@ class TerminalHandler(SimpleHTTPRequestHandler):
 
                 # Write command to commands.json
                 with open(COMMANDS_FILE, 'a') as f:
-                    json.dump({'command': cmd, 'timestamp': os.time()}, f)
-                    f.write('\n') # Add newline for easier parsing of multiple commands
+                    json.dump({'command': cmd, 'timestamp': time.time()}, f)
+                    f.write('\n')
+
+                if cmd == '/reset':
+                    # Clear responses.json on reset
+                    with open(RESPONSES_FILE, 'w') as f:
+                        json.dump({"messages": []}, f)
+                    response_text = "Terminal reset."
+                else:
+                    response_text = f"Acknowledged command → {cmd}. Waiting for LLM response..."
+                
+                self._send_json({'response': response_text})
 
             except json.JSONDecodeError:
-                cmd = ''
+                self._send_json({'response': "Error: Invalid JSON payload."})
             except Exception as e:
-                print(f"Error writing to commands.json: {e}")
+                print(f"Error processing command: {e}")
                 self._send_json({'response': f"Error processing command: {e}"})
-                return
-
-            # For demo, we just echo back. In a real scenario, an external process
-            # would read commands.json, process it, and write to responses.json
-            response_text = f"Acknowledged command → {cmd}. Waiting for LLM response..."
-            self._send_json({'response': response_text})
         else:
             self.send_error(404, 'Endpoint not found')
 
@@ -65,13 +77,17 @@ if __name__ == '__main__':
     # Ensure commands.json and responses.json exist
     if not os.path.exists(COMMANDS_FILE):
         with open(COMMANDS_FILE, 'w') as f:
-            f.write('') # Create empty file
-
+            f.write('')
+    
     if not os.path.exists(RESPONSES_FILE):
         with open(RESPONSES_FILE, 'w') as f:
-            json.dump({"messages": []}, f) # Create with empty messages array
+            json.dump({"messages": []}, f)
 
-    server_address = ('', PORT)  # Listen on all interfaces
+    # Change directory to where index.html is located
+    web_dir = os.path.join(os.path.dirname(__file__))
+    os.chdir(web_dir)
+
+    server_address = ('', PORT)
     httpd = HTTPServer(server_address, TerminalHandler)
     print(f"Serving Holo-Suite Terminal at http://0.0.0.0:{PORT}/index.html")
     print("Press Ctrl+C to stop.")

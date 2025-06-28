@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     const outputDiv = document.getElementById('output');
     const inputField = document.getElementById('input');
+    let lastMessageCount = 0; // Track the number of messages already displayed
 
     function appendMessage(message) {
         const p = document.createElement('p');
@@ -9,7 +10,17 @@ document.addEventListener('DOMContentLoaded', () => {
         outputDiv.scrollTop = outputDiv.scrollHeight; // Auto-scroll to bottom
     }
 
+    function clearOutput() {
+        outputDiv.innerHTML = '';
+    }
+
     async function sendCommand(command) {
+        if (command === '/reset') {
+            clearOutput();
+            appendMessage('Terminal has been reset.');
+            lastMessageCount = 0; // Reset message count
+        }
+        
         appendMessage(`¶:/ > ${command}`); // Echo command to output
         inputField.value = ''; // Clear input
 
@@ -42,17 +53,24 @@ document.addEventListener('DOMContentLoaded', () => {
     appendMessage('Holo-Suite Terminal v1.0');
     appendMessage('Type "help" for a list of commands.');
 
-    // Polling for responses.json updates (simplified for client-side)
-    // In a real scenario, you'd want WebSockets or Server-Sent Events for efficiency
+    // Polling for responses.json updates
     async function pollResponses() {
         try {
             const response = await fetch('/responses.json');
             const data = await response.json();
-            // Assuming responses.json contains an array of new messages
-            // This is a simplified example, you'd need logic to only append new messages
-            if (data.messages && data.messages.length > 0) {
+            if (data.messages && data.messages.length > lastMessageCount) {
+                const newMessages = data.messages.slice(lastMessageCount);
+                newMessages.forEach(msg => {
+                    appendMessage(`[SERVER]: ${msg}`);
+                });
+                lastMessageCount = data.messages.length;
+            } else if (data.messages && data.messages.length < lastMessageCount) {
+                // This case handles the reset, where the message count is less than before
+                clearOutput();
+                appendMessage('Holo-Suite Terminal v1.0');
+                appendMessage('Type "help" for a list of commands.');
                 data.messages.forEach(msg => appendMessage(`[SERVER]: ${msg}`));
-                // Clear responses.json or mark as read on the server after processing
+                lastMessageCount = data.messages.length;
             }
         } catch (error) {
             // console.error('Error polling responses:', error);
