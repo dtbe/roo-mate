@@ -29,8 +29,8 @@ This document outlines a strategic plan for evolving the current web interface i
 *   **Features:**
     *   Conversational continuity (implemented).
     *   `/reset` command (implemented).
-    *   `/mode <mode_slug>` command (implemented).
-    *   Interactive "ask" messages with suggested responses (implemented).
+    *   `/mode <mode_slug>` command (implemented. not working?).
+    *   Interactive "ask" messages with suggested responses (implemented? not working).
     *   **Next Immediate Step:** Displaying the model's `reasoning` (thoughts) in real-time. This involves listening for `message` events with `type: "say"` and `say: "reasoning"` and streaming them to the frontend.
 *   **Technical Focus:** Refine `roo-relay`'s event listening and `responses.json` structure to differentiate between various message types (`say`, `ask`, `reasoning`). Enhance `script.js` to render these types appropriately.
 
