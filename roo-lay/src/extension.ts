@@ -82,11 +82,12 @@ interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
 }
 
 // Path to the watched file
-const WATCHED_FILE_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'commands.json');
-const WEB_TERMINAL_RESPONSES_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'responses.json');
+const WATCHED_FILE_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'roo-mote', 'commands.json');
+const WEB_TERMINAL_RESPONSES_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'roo-mote', 'responses.json');
 
 let activeTaskId: string | null = null;
 let messageHandlerRegistered: boolean = false;
+let fileWatcher: fs.FSWatcher | null = null;
 
 // Helper function to get Roo Code API
 function getRooCodeApi(): RooCodeAPI | undefined {
@@ -115,7 +116,7 @@ class MessageInstructionBuilder {
                 `SOURCE=DISCORD`,
                 `DISCORD_CHANNEL_ID=${payload.discord.channelId}`,
                 `DISCORD_USER_NAME=${payload.discord.authorUsername}`,
-                `DISCORD_MESSAGE_ID=${payload.discord.messageContent}`, // Assuming messageContent is unique enough for ID
+                `DISCORD_MESSAGE_ID=${payload.discord.messageId}`,
                 `IS_DIRECT_MENTION=true`, // Assuming all triggers are direct mentions for now
                 `HAS_TTS=${payload.discord.ttsRequested}`
             ];
@@ -230,164 +231,178 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   // Watch the file for changes
-  fs.watch(WATCHED_FILE_PATH, async (eventType: fs.WatchEventType, filename: string | null) => { // Corrected filename type
-    if (eventType === 'change') {
-      console.log(`Watched file changed: ${filename}`);
-      try {
+  fileWatcher = fs.watch(WATCHED_FILE_PATH, async (eventType: fs.WatchEventType, filename: string | null) => {
+    if (eventType !== 'change') {
+        return;
+    }
+
+    console.log(`Watched file changed: ${filename}`);
+    try {
         const fileContent = fs.readFileSync(WATCHED_FILE_PATH, 'utf8');
         const lines = fileContent.split('\n').filter(line => line.trim() !== '');
         if (lines.length === 0) {
             return; // No new commands
         }
         const lastLine = lines[lines.length - 1];
-        const payload = JSON.parse(lastLine); // Assuming each line is a JSON object
 
-        // Clear the commands.json file after reading the last command
+        // Clear the commands.json file immediately after reading to prevent race conditions
         fs.writeFileSync(WATCHED_FILE_PATH, '');
+
+        let payload: any;
+        try {
+            payload = JSON.parse(lastLine);
+        } catch (jsonError) {
+            console.error('Invalid JSON in command file:', lastLine, jsonError);
+            vscode.window.showErrorMessage('Invalid command format. Please ensure the command is valid JSON.');
+            return;
+        }
 
         const rooCodeApi = getRooCodeApi();
         if (!rooCodeApi) {
-          vscode.window.showErrorMessage("Roo Code API not available. Cannot trigger LLM.");
-          return;
-        }
-
-        if (payload.command === '.reset') {
-            if (activeTaskId) {
-                await rooCodeApi.cancelCurrentTask();
-                activeTaskId = null; // Reset for a clean start
-            }
-            messageHandlerRegistered = false;
-            vscode.window.showInformationMessage(`Terminal reset.`);
+            vscode.window.showErrorMessage("Roo Code API not available. Cannot trigger LLM.");
             return;
         }
 
-        if (payload.command === '.mode') {
-            const modeSlug = payload.mode;
+        // Helper to write to responses.json
+        const writeToResponses = (message: any) => {
+            let existingResponses: { messages: any[] } = { messages: [] };
             try {
-                // Send mode change message using the same format as the UI
-                await rooCodeApi.sendMessage(JSON.stringify({
-                    type: "mode",
-                    text: modeSlug,
-                }));
-                vscode.window.showInformationMessage(`Mode changed to '${modeSlug}'.`);
-            } catch (error: unknown) {
-                if (error instanceof Error) {
-                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': ${error.message}`);
-                } else {
-                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': An unknown error occurred.`);
+                const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
+                if (responsesContent) {
+                    existingResponses = JSON.parse(responsesContent);
                 }
+            } catch (readError) {
+                // File might not exist yet, which is fine.
             }
-            return;
-        }
+            existingResponses.messages.push(message);
+            fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
+        };
 
-        // Handle askResponse from web terminal
-        if (payload.command === '/askResponse') {
-            if (activeTaskId && rooCodeApi.handleWebviewAskResponse) {
-                const askResponse = payload.askResponse;
-                const text = payload.text;
-                const images = payload.images;
-                await rooCodeApi.handleWebviewAskResponse(askResponse, text, images);
-                vscode.window.showInformationMessage(`Response sent to Roo Code API.`);
-            } else {
-                vscode.window.showErrorMessage(`Cannot send ask response: no active task or API not ready.`);
-            }
-            return;
-        }
-
-
-        if (activeTaskId) {
-            await rooCodeApi.sendMessage(payload.command);
-            vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
-        } else {
-            let taskInstructions: string;
-            let updatedConfig: any;
-            let source: 'discord' | 'web-terminal';
-    
-            if (payload.command) {
-                source = 'web-terminal';
-                const instructionBuilder = new MessageInstructionBuilder()
-                    .addHeader(payload, source)
-                    .addHistory([], source) 
-                    .addInstructions(source)
-                    .addMessage(payload.command);
-                taskInstructions = instructionBuilder.toString();
-                updatedConfig = {
-                    ...rooCodeApi.getConfiguration(),
-                    mode: 'ask', 
-                    webTerminalContext: { 
-                        command: payload.command,
-                        timestamp: payload.timestamp,
-                    }
-                };
-            } else {
-                console.warn('Unknown payload format in watched file:', payload);
+        // Command processing logic
+        switch (payload.command) {
+            case '.reset':
+                if (activeTaskId) {
+                    await rooCodeApi.cancelCurrentTask();
+                    activeTaskId = null;
+                }
+                messageHandlerRegistered = false;
+                try {
+                    // Clear responses and add a system message and mode indicator
+                    const initialMessages = {
+                        messages: [
+                            { type: 'system', content: 'Terminal has been reset.' },
+                            { type: 'mode_change', mode: rooCodeApi.getConfiguration().mode || 'ask' }
+                        ]
+                    };
+                    fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(initialMessages, null, 2));
+                } catch (error) {
+                    console.error('Failed to clear responses.json:', error);
+                }
                 return;
-            }
-    
-            activeTaskId = await rooCodeApi.startNewTask({
-                configuration: updatedConfig,
-                text: taskInstructions
-            });
-    
-            vscode.window.showInformationMessage(`New task started! Task ID: ${activeTaskId}`);
-            
-            // Only register message handler if not already registered
-            if (!messageHandlerRegistered) {
-                const messageHandler = (event: any) => {
-                    if (event.taskId === activeTaskId) {
-                        let existingResponses: { messages: any[] } = { messages: [] };
-                        try {
-                            const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
-                            existingResponses = JSON.parse(responsesContent);
-                        } catch (readError) {
-                            console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
-                        }
 
-                        if (event.message.type === 'say' && event.message.say === 'completion_result') {
-                            const llmResponse = event.message.text;
-                            if (llmResponse) {
-                                existingResponses.messages.push({ type: 'say', content: llmResponse });
-                                fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
+            case '.mode':
+                const modeSlug = payload.mode;
+                try {
+                    await rooCodeApi.sendMessage(JSON.stringify({ type: "mode", text: modeSlug }));
+                    writeToResponses({ type: 'mode_change', mode: modeSlug });
+                } catch (error: unknown) {
+                    const message = error instanceof Error ? error.message : 'An unknown error occurred.';
+                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': ${message}`);
+                }
+                return;
+
+            case '/askResponse':
+                if (activeTaskId && rooCodeApi.handleWebviewAskResponse) {
+                    writeToResponses({ type: 'user', content: payload.text });
+                    await rooCodeApi.handleWebviewAskResponse(payload.askResponse, payload.text, payload.images);
+                } else {
+                    vscode.window.showErrorMessage(`Cannot send ask response: no active task or API not ready.`);
+                }
+                return;
+
+            default:
+                // Log user's command to responses.json
+                writeToResponses({ type: 'user', content: payload.command });
+
+                // Handle standard messages
+                if (activeTaskId) {
+                    await rooCodeApi.sendMessage(payload.command);
+                } else {
+                    // Start a new task
+                    const source = 'web-terminal';
+                    const instructionBuilder = new MessageInstructionBuilder()
+                        .addHeader(payload, source)
+                        .addHistory([], source)
+                        .addInstructions(source)
+                        .addMessage(payload.command);
+                    const taskInstructions = instructionBuilder.toString();
+                    const currentConfig = rooCodeApi.getConfiguration();
+                    const updatedConfig = {
+                        ...currentConfig,
+                        mode: currentConfig.mode || 'ask',
+                        webTerminalContext: {
+                            command: payload.command,
+                            timestamp: payload.timestamp,
+                        }
+                    };
+
+                    activeTaskId = await rooCodeApi.startNewTask({
+                        configuration: updatedConfig,
+                        text: taskInstructions
+                    });
+                    
+                    // Set initial mode display
+                    writeToResponses({ type: 'mode_change', mode: updatedConfig.mode });
+
+                    if (!messageHandlerRegistered) {
+                        const messageHandler = (event: any) => {
+                            if (event.taskId !== activeTaskId) return;
+                            
+                            let messageToWrite = null;
+                            if (event.message.type === 'say' && event.message.text) {
+                                const content = `[${event.message.say}] ${event.message.text}`;
+                                messageToWrite = { type: 'say', content: content };
+                            } else if (event.message.type === 'ask') {
+                                messageToWrite = {
+                                    type: 'ask',
+                                    text: event.message.text,
+                                    choices: event.message.choices,
+                                    askType: event.message.ask,
+                                };
                             }
-                        } else if (event.message.type === 'ask') {
-                            const askMessage = {
-                                type: 'ask',
-                                text: event.message.text,
-                                choices: event.message.choices,
-                                askType: event.message.ask,
-                            };
-                            existingResponses.messages.push(askMessage);
-                            fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
-                        }
-                    }
-                };
-                rooCodeApi.on(RooCodeEventName.Message, messageHandler);
-                messageHandlerRegistered = true;
 
-                const completionHandler = (completedTaskId: string) => {
-                    if (completedTaskId === activeTaskId) {
-                        // Don't reset activeTaskId to maintain conversation continuity
-                        // Only remove event listeners to prevent memory leaks
-                        messageHandlerRegistered = false;
-                        rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler);
-                        rooCodeApi.off(RooCodeEventName.Message, messageHandler);
-                    }
-                };
-                rooCodeApi.on(RooCodeEventName.TaskCompleted, completionHandler);
+                            if (messageToWrite) {
+                                writeToResponses(messageToWrite);
+                            }
+                        };
+                        rooCodeApi.on(RooCodeEventName.Message, messageHandler);
+                        messageHandlerRegistered = true;
 
-                context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.Message, messageHandler)));
-                context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler)));
-            }
+                        const completionHandler = (completedTaskId: string) => {
+                            if (completedTaskId === activeTaskId) {
+                                activeTaskId = null;
+                                messageHandlerRegistered = false;
+                                rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler);
+                                rooCodeApi.off(RooCodeEventName.Message, messageHandler);
+                            }
+                        };
+                        rooCodeApi.on(RooCodeEventName.TaskCompleted, completionHandler);
+
+                        context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.Message, messageHandler)));
+                        context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler)));
+                    }
+                }
         }
-
-      } catch (error) {
+    } catch (error) {
         console.error('Error processing watched file:', error);
         vscode.window.showErrorMessage('Error processing message for Roo Code LLM.');
-      }
     }
   });
 }
 
 export function deactivate() {
+  if (fileWatcher) {
+    fileWatcher.close();
+  }
   console.log('"roo-lay" is now deactivated!');
 }

@@ -15,17 +15,30 @@ body {
     width: 80%;
     max-width: 800px;
     border: 2px solid #0f0; /* Green border for retro feel */
-    padding: 20px;
+    padding: 10px 20px 20px 20px;
     box-shadow: 0 0 15px rgba(0, 255, 0, 0.7); /* Green glow */
     background-color: rgba(0, 0, 0, 0.8); /* Slightly transparent background */
+    display: flex;
+    flex-direction: column;
+    height: 85vh;
+}
+
+#header {
+    text-align: right;
+    color: #0f0;
+    font-size: 0.8em;
+    padding-bottom: 5px;
+    border-bottom: 1px solid #0f0;
+    margin-bottom: 10px;
+    min-height: 1em;
 }
 
 #output {
     white-space: pre-wrap;
     word-wrap: break-word;
     margin-bottom: 10px;
-    max-height: 70vh;
     overflow-y: auto;
+    flex-grow: 1;
 }
 
 .prompt-line {
@@ -44,4 +57,19 @@ body {
     flex-grow: 1;
     outline: none;
     caret-color: #0f0; /* Green cursor */
+}
+
+.ask-choice-button {
+    background-color: #0a0a0a;
+    border: 1px solid #0f0;
+    color: #0f0;
+    padding: 5px 10px;
+    margin: 5px 5px 5px 0;
+    cursor: pointer;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.ask-choice-button:hover {
+    background-color: #0f0;
+    color: black;
 }
