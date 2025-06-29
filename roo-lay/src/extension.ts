@@ -222,7 +222,7 @@ class MessageInstructionBuilder {
 
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log('Congratulations, "roo-relay" is now active!');
+  console.log('Congratulations, "roo-lay" is now active!');
 
   // Ensure the watched file exists, or create it
   if (!fs.existsSync(WATCHED_FILE_PATH)) {
@@ -389,5 +389,5 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-  console.log('"roo-relay" is now deactivated!');
+  console.log('"roo-lay" is now deactivated!');
 }

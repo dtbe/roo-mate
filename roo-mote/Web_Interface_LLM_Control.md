@@ -12,13 +12,13 @@ Imagine the terminal as a "screen" or "canvas" that the LLM can draw upon, not j
 
 The LLM has direct access to the following files that define the web terminal's appearance and functionality:
 
-*   **HTML Structure:** [`00-Repositories/00/roo-mate/interface/index.html`](00-Repositories/00/roo-mate/interface/index.html)
+*   **HTML Structure:** [`00-Repositories/00/roo-mate/roo-mote/index.html`](00-Repositories/00/roo-mate/roo-mote/index.html)
     *   **Purpose:** Defines the overall layout, content, and elements of the web page.
     *   **LLM Control:** The LLM can add, remove, or modify HTML tags to introduce new sections, images, video players, interactive buttons, or change the text content.
-*   **CSS Styling:** [`00-Repositories/00/roo-mate/interface/style.css`](00-Repositories/00/roo-mate/interface/style.css)
+*   **CSS Styling:** [`00-Repositories/00/roo-mate/roo-mote/style.css`](00-Repositories/00/roo-mate/roo-mote/style.css)
     *   **Purpose:** Controls the visual presentation of the HTML elements (colours, fonts, layout, animations).
     *   **LLM Control:** The LLM can change background colours, text styles, element positions, introduce animations, or apply new visual themes by altering CSS rules.
-*   **JavaScript Logic:** [`00-Repositories/00/roo-mate/interface/script.js`](00-Repositories/00/roo-mate/interface/script.js)
+*   **JavaScript Logic:** [`00-Repositories/00/roo-mate/roo-mote/script.js`](00-Repositories/00/roo-mate/roo-mote/script.js)
     *   **Purpose:** Manages dynamic behaviour, user interactions, and communication with the backend.
     *   **LLM Control:** The LLM can modify JavaScript to introduce new interactive features, change how user input is handled, dynamically load content, or even trigger specific browser actions.
 
@@ -29,7 +29,7 @@ The LLM will use its file manipulation tools to directly edit these files:
 *   **`write_to_file`**: Use this for comprehensive rewrites of an entire file. For example, to completely change the HTML structure or replace an entire CSS stylesheet.
     ```xml
     <write_to_file>
-    <path>00-Repositories/00/roo-mate/interface/style.css</path>
+    <path>00-Repositories/00/roo-mate/roo-mote/style.css</path>
     <content>
     body { background-color: #ff0000; } <!-- Example: Change background to red -->
     

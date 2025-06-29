@@ -18,7 +18,7 @@
 ## Fixes Implemented
 
 ### 1. Fixed Conversation Continuity
-**Location**: `00-Repositories/00/roo-mate/roo-relay/src/extension.ts`
+**Location**: `00-Repositories/00/roo-mate/roo-lay/src/extension.ts`
 
 **Changes**:
 - Added `messageHandlerRegistered` flag to track handler registration state
@@ -50,7 +50,7 @@ const completionHandler = (completedTaskId: string) => {
 ```
 
 ### 2. Prevented Handler Duplication
-**Location**: `00-Repositories/00/roo-mate/roo-relay/src/extension.ts`
+**Location**: `00-Repositories/00/roo-mate/roo-lay/src/extension.ts`
 
 **Changes**:
 - Added guard clause to only register message handlers when not already registered
@@ -71,7 +71,7 @@ if (!messageHandlerRegistered) {
 ```
 
 ### 3. Fixed Reset Command
-**Location**: `00-Repositories/00/roo-mate/roo-relay/src/extension.ts`
+**Location**: `00-Repositories/00/roo-mate/roo-lay/src/extension.ts`
 
 **Changes**:
 - Reset command now properly clears `activeTaskId` for a clean start

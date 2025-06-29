@@ -5,7 +5,7 @@ This project provides a simple integration between Discord and the Roo Code LLM,
 ## Components
 
 *   **`discord-logger`**: A Discord bot that logs messages locally and triggers the Roo Code LLM when mentioned.
-*   **`roo-relay`**: A VS Code extension that acts as a bridge, relaying messages from `discord-logger` to the Roo Code LLM.
+*   **`roo-lay`**: A VS Code extension that acts as a bridge, relaying messages from `discord-logger` to the Roo Code LLM.
 
 ## Getting Started
 
@@ -41,11 +41,11 @@ This component logs Discord messages and prepares them for the Roo Code LLM.
 
 This extension relays messages to the Roo Code LLM.
 
-1.  **Open the `roo-relay` folder in VS Code:**
-    Open a new VS Code window and select `File > Open Folder...`, then navigate to `roo-mate/roo-relay`.
+1.  **Open the `roo-lay` folder in VS Code:**
+    Open a new VS Code window and select `File > Open Folder...`, then navigate to `roo-mate/roo-lay`.
 2.  **Run in Development Mode:**
-    Press `F5`. This will launch a new VS Code Extension Development Host window with the `roo-relay` extension active.
+    Press `F5`. This will launch a new VS Code Extension Development Host window with the `roo-lay` extension active.
 
 ## How it Works
 
-The `discord-logger` bot listens for messages. When it's mentioned, it compiles relevant message history and writes it to a file (`roo_code_input.json`). The `roo-relay` VS Code extension watches this file. When the file changes, `roo-relay` reads the content and passes it to the Roo Code LLM via the VS Code API. The LLM then processes the message and can respond using its own Discord MCP tool or trigger TTS via ElevenLabs MCP.
+The `discord-logger` bot listens for messages. When it's mentioned, it compiles relevant message history and writes it to a file (`roo_code_input.json`). The `roo-lay` VS Code extension watches this file. When the file changes, `roo-lay` reads the content and passes it to the Roo Code LLM via the VS Code API. The LLM then processes the message and can respond using its own Discord MCP tool or trigger TTS via ElevenLabs MCP.

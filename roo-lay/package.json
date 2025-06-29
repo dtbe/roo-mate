@@ -1,5 +1,5 @@
 {
-  "name": "roo-relay",
+  "name": "roo-lay",
   "displayName": "Roo Relay",
   "description": "VS Code extension to relay Discord messages to Roo Code LLM.",
   "version": "1.0.0",
@@ -21,7 +21,7 @@
   "contributes": {
     "commands": [
       {
-        "command": "roo-relay.triggerRooCode",
+        "command": "roo-lay.triggerRooCode",
         "title": "Trigger Roo Code LLM"
       }
     ]

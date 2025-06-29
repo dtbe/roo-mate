@@ -32,7 +32,7 @@ This document outlines a strategic plan for evolving the current web interface i
     *   `/mode <mode_slug>` command (implemented. not working?).
     *   Interactive "ask" messages with suggested responses (implemented? not working).
     *   **Next Immediate Step:** Displaying the model's `reasoning` (thoughts) in real-time. This involves listening for `message` events with `type: "say"` and `say: "reasoning"` and streaming them to the frontend.
-*   **Technical Focus:** Refine `roo-relay`'s event listening and `responses.json` structure to differentiate between various message types (`say`, `ask`, `reasoning`). Enhance `script.js` to render these types appropriately.
+*   **Technical Focus:** Refine `roo-lay`'s event listening and `responses.json` structure to differentiate between various message types (`say`, `ask`, `reasoning`). Enhance `script.js` to render these types appropriately.
 
 **Phase 2: Advanced Control & Configuration**
 *   **Goal:** Empower users to configure the `roo-code` environment directly from the web interface.
@@ -44,7 +44,7 @@ This document outlines a strategic plan for evolving the current web interface i
     *   **Task Management Controls:** Dedicated UI buttons for "Start New Task," "Cancel Current Task," and potentially "Pause/Resume Task."
 *   **Technical Focus:**
     *   Extend `commands.json` payload to include configuration data.
-    *   `roo-relay` will use `rooCodeApi.setConfiguration()` and `rooCodeApi.upsertProviderProfile()` to apply settings.
+    *   `roo-lay` will use `rooCodeApi.setConfiguration()` and `rooCodeApi.upsertProviderProfile()` to apply settings.
     *   `responses.json` might need to include current configuration state for the UI to display.
 
 **Phase 3: Real-time Visualisation & Rich Media**
@@ -63,7 +63,7 @@ This document outlines a strategic plan for evolving the current web interface i
 *   **Features:**
     *   **Responsive Design:** Ensure the web interface adapts gracefully to different screen sizes.
     *   **Authentication (Optional):** If the `roo-code` extension supports remote access or a cloud component, integrate authentication.
-    *   **API Export Simplification:** Provide clear documentation and potentially a simplified SDK for building custom interfaces that directly consume the `roo-relay`'s web server API.
+    *   **API Export Simplification:** Provide clear documentation and potentially a simplified SDK for building custom interfaces that directly consume the `roo-lay`'s web server API.
     *   **WebSockets/SSE:** Migrate from polling `responses.json` to a more efficient real-time communication mechanism (WebSockets or Server-Sent Events) for better performance, especially on mobile.
 *   **Technical Focus:**
     *   Refactor frontend CSS and HTML for responsiveness.
