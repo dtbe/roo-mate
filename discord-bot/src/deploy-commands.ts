@@ -8,6 +8,7 @@ dotenv.config();
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 
 if (!DISCORD_TOKEN) {
     console.error('❌ DISCORD_TOKEN is required in environment variables');
@@ -16,6 +17,11 @@ if (!DISCORD_TOKEN) {
 
 if (!CLIENT_ID) {
     console.error('❌ CLIENT_ID is required in environment variables');
+    process.exit(1);
+}
+
+if (!GUILD_ID) {
+    console.error('❌ GUILD_ID is required in environment variables');
     process.exit(1);
 }
 
@@ -41,9 +47,9 @@ async function deployCommands() {
     try {
         console.log('🔄 Started refreshing application (/) commands.');
 
-        // Register commands globally
+        // Register commands for a specific guild
         await rest.put(
-            Routes.applicationCommands(CLIENT_ID!),
+            Routes.applicationGuildCommands(CLIENT_ID!, GUILD_ID!),
             { body: commands }
         );
 

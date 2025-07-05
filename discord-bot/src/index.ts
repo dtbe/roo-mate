@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, Message, Interaction } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Message, Interaction, TextChannel } from 'discord.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as dotenv from 'dotenv';
 
@@ -8,10 +8,16 @@ dotenv.config();
 // Configuration
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEBSOCKET_PORT = parseInt(process.env.WEBSOCKET_PORT || '8080');
-const TARGET_USER = process.env.TARGET_USER || '.uncle_dan';
+const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
+const TARGET_USER = process.env.TARGET_USER;
 
 if (!DISCORD_TOKEN) {
     console.error('❌ DISCORD_TOKEN is required in environment variables');
+    process.exit(1);
+}
+
+if (!TARGET_CHANNEL_ID && !TARGET_USER) {
+    console.error('❌ TARGET_CHANNEL_ID or TARGET_USER must be defined in environment variables');
     process.exit(1);
 }
 
@@ -19,6 +25,7 @@ if (!DISCORD_TOKEN) {
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent
     ]
@@ -30,14 +37,20 @@ const wss = new WebSocketServer({ port: WEBSOCKET_PORT });
 // Store connected WebSocket clients
 const connectedClients: Set<WebSocket> = new Set();
 
-// Store target user for DMs
-let targetUserCache: any = null;
+// Store the context of the last message to know where to reply
+let lastMessageContext: Message | Interaction | null = null;
 
 // Function to format event messages for Discord
-function formatEventForDiscord(eventName: string, data: any): string {
+function formatEventForDiscord(eventName: string, data: any): string | null {
     switch (eventName) {
         case 'message':
             const message = data.message;
+
+            // Filter out noisy LiteLLM errors
+            if (message.text && message.text.includes('Failed to fetch LiteLLM models')) {
+                return null; // Returning null will prevent the message from being sent
+            }
+
             if (message.say === 'reasoning') {
                 return `🤔 **Thinking...**\n\`\`\`\n${message.reasoning || message.text || 'Processing...'}\n\`\`\``;
             } else if (message.say === 'completion_result') {
@@ -46,19 +59,44 @@ function formatEventForDiscord(eventName: string, data: any): string {
                 return `🛠️ **Using Tool:** \`${message.text || 'Unknown tool'}\``;
             } else if (message.say === 'text') {
                 return `💬 ${message.text || ''}`;
-            } else if (message.ask === 'followup') {
+            } else if (message.say === 'api_req_started') {
+                return `⏳ **Loading...**`;
+            } else if (message.ask === 'followup' || (message.ask && (message.choices || message.text?.startsWith('{')))) {
+                try {
+                    // Handle cases where the entire 'text' is a JSON string
+                    if (message.text && message.text.trim().startsWith('{')) {
+                        const parsed = JSON.parse(message.text);
+                        let formatted = `❓ **Question:**\n${parsed.question || ''}`;
+                        if (parsed.suggest && parsed.suggest.length > 0) {
+                            formatted += '\n\n**Please choose an option:**';
+                            parsed.suggest.forEach((choice: any, index: number) => {
+                                formatted += `\n${index + 1}. ${choice.label || choice.answer}`;
+                            });
+                        }
+                        return formatted;
+                    }
+                } catch (e) {
+                    // Not a valid JSON, fall through to default handling
+                }
+
                 let formatted = `❓ **Question:**\n${message.text || ''}`;
                 if (message.choices && message.choices.length > 0) {
-                    formatted += '\n\n**Choices:**';
+                    formatted += '\n\n**Please choose an option:**';
                     message.choices.forEach((choice: any, index: number) => {
-                        formatted += `\n${index + 1}. ${choice.label}`;
+                        formatted += `\n${index + 1}. ${choice.label || choice.answer}`;
                     });
                 }
                 return formatted;
             } else if (message.ask) {
                 return `❓ **Question:** ${message.text || ''}`;
             } else {
-                return `📝 ${message.text || JSON.stringify(message)}`;
+                // Fallback for unhandled message 'say' types
+                if (message.text) {
+                    return `📝 ${message.text}`;
+                }
+                // Avoid sending raw JSON if possible
+                console.log("Unhandled message type, sending generic message:", message);
+                return `📝 Processing update...`;
             }
         
         case 'taskCompleted':
@@ -141,38 +179,40 @@ function splitMessage(message: string, maxLength: number = 2000): string[] {
     return chunks;
 }
 
-// Function to send DM to target user
-async function sendDMToTargetUser(message: string): Promise<void> {
+// Function to send a message to a specific channel
+async function sendMessageToChannel(channelId: string, content: string): Promise<void> {
     try {
-        // Use cached target user if available
-        let targetUser = targetUserCache;
-        
-        // If not cached, try to find in Discord cache
-        if (!targetUser) {
-            targetUser = client.users.cache.find(u => u.username === TARGET_USER);
-        }
-        
-        if (!targetUser) {
-            console.log(`ℹ️ Target user ${TARGET_USER} not found. The user must send a DM first to be cached.`);
-            return;
-        }
-        
-        // Split message if it's too long
-        const messageParts = splitMessage(message);
-        
-        // Send each part as a separate message
-        for (const part of messageParts) {
-            await targetUser.send(part);
-            console.log(`📤 Sent DM to ${TARGET_USER}: ${part.substring(0, 100)}${part.length > 100 ? '...' : ''}`);
-            
-            // Small delay between messages to avoid rate limiting
-            if (messageParts.length > 1) {
-                await new Promise(resolve => setTimeout(resolve, 100));
+        const channel = await client.channels.fetch(channelId);
+        if (channel && channel.isTextBased()) {
+            const messageParts = splitMessage(content);
+            for (const part of messageParts) {
+                // Cast to TextChannel after the type guard to satisfy the compiler
+                await (channel as TextChannel).send(part);
+                console.log(`📤 Sent message to channel #${(channel as any).name}`);
             }
+        } else {
+            console.error(`❌ Channel ${channelId} not found or is not a text channel.`);
         }
-        
     } catch (error) {
-        console.error(`❌ Error sending DM to ${TARGET_USER}:`, error);
+        console.error(`❌ Error sending message to channel ${channelId}:`, error);
+    }
+}
+
+// Function to send a DM to a specific user
+async function sendDmToUser(userId: string, content: string): Promise<void> {
+    try {
+        const user = await client.users.fetch(userId);
+        if (user) {
+            const messageParts = splitMessage(content);
+            for (const part of messageParts) {
+                await user.send(part);
+                console.log(`📤 Sent DM to user ${user.username}`);
+            }
+        } else {
+            console.error(`❌ User ${userId} not found.`);
+        }
+    } catch (error) {
+        console.error(`❌ Error sending DM to user ${userId}:`, error);
     }
 }
 
@@ -185,11 +225,26 @@ wss.on('connection', (ws: WebSocket) => {
         try {
             const message = JSON.parse(data.toString());
             console.log('📨 Received WebSocket message:', message);
+
+            // Ignore partial message updates to prevent spam
+            if (message.data?.message?.partial === true) {
+                return;
+            }
             
             // Handle event messages from roo-lay extension
-            if (message.type === 'event') {
+            if (message.type === 'event' && lastMessageContext) {
                 const formattedMessage = formatEventForDiscord(message.eventName, message.data);
-                await sendDMToTargetUser(formattedMessage);
+                // Only send if the message is not filtered out (is not null)
+                if (formattedMessage) {
+                    if (lastMessageContext.guild && lastMessageContext.channelId) {
+                        // It was a channel message
+                        await sendMessageToChannel(lastMessageContext.channelId, formattedMessage);
+                    } else {
+                        // It was a DM
+                        const userId = 'user' in lastMessageContext ? lastMessageContext.user.id : lastMessageContext.author.id;
+                        await sendDmToUser(userId, formattedMessage);
+                    }
+                }
             }
         } catch (error) {
             console.error('❌ Error processing WebSocket message:', error);
@@ -234,48 +289,86 @@ function broadcastToClients(data: any) {
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`🤖 Discord bot ready! Logged in as ${readyClient.user.tag}`);
     console.log(`🔌 WebSocket server listening on port ${WEBSOCKET_PORT}`);
-    console.log(`👤 Listening for DMs from user: ${TARGET_USER}`);
+    if (TARGET_CHANNEL_ID) console.log(`📢 Listening for messages in channel: ${TARGET_CHANNEL_ID}`);
+    if (TARGET_USER) console.log(`👤 Listening for DMs from user: ${TARGET_USER}`);
 });
 
 client.on(Events.MessageCreate, (message: Message) => {
-    // Only process direct messages
-    if (!message.guild && !message.author.bot) {
-        console.log(`📨 DM received from ${message.author.username}: ${message.content}`);
+    if (message.author.bot) return;
+
+    const isDirectMessage = !message.guild;
+    const isTargetChannel = message.channel.id === TARGET_CHANNEL_ID;
+    const userTag = `${message.author.username}#${message.author.discriminator}`;
+    const isTargetUser = message.author.username === TARGET_USER || userTag === TARGET_USER;
+
+    if (isTargetChannel || (isDirectMessage && isTargetUser)) {
+        const source = isDirectMessage ? `DM from ${message.author.tag}` : `channel ${TARGET_CHANNEL_ID}`;
+        console.log(`📨 Message received from ${source}: ${message.content}`);
         
-        // Check if the message is from the target user
-        if (message.author.username === TARGET_USER) {
-            console.log(`✅ Message from target user ${TARGET_USER}, broadcasting to WebSocket clients`);
-            
-            // Cache the target user for later DM sending
-            if (!targetUserCache) {
-                targetUserCache = message.author;
-                console.log(`👤 Cached target user ${TARGET_USER} for DM sending`);
-            }
-            
-            // Handle regular message (slash commands are now handled via interactionCreate)
-            console.log('💬 Regular message received, broadcasting message payload');
-            broadcastToClients({
-                type: 'message',
-                content: message.content
-            });
-        } else {
-            console.log(`ℹ️ Message from ${message.author.username} (not target user), ignoring`);
-        }
+        // Store context for replies
+        lastMessageContext = message;
+        
+        // Broadcast to clients
+        console.log('💬 Broadcasting message payload to WebSocket clients');
+        broadcastToClients({
+            type: 'message',
+            content: message.content
+        });
     }
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-    // Only handle slash commands in DMs from the target user
-    if (!interaction.isChatInputCommand() || interaction.guild || interaction.user.username !== TARGET_USER) {
-        return;
-    }
-    
-    console.log(`⚡ Slash command received from ${interaction.user.username}: /${interaction.commandName}`);
-    
-    // Cache the target user for later DM sending
-    if (!targetUserCache) {
-        targetUserCache = interaction.user;
-        console.log(`👤 Cached target user ${TARGET_USER} for DM sending`);
+    if (!interaction.isChatInputCommand()) return;
+
+    const isDirectMessage = !interaction.guild;
+    const isTargetChannel = interaction.channelId === TARGET_CHANNEL_ID;
+    const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
+    const isTargetUser = interaction.user.username === TARGET_USER || userTag === TARGET_USER;
+
+    if (isTargetChannel || (isDirectMessage && isTargetUser)) {
+        const source = isDirectMessage ? `DM from ${interaction.user.tag}` : `channel ${TARGET_CHANNEL_ID}`;
+        console.log(`⚡ Slash command received from ${source}: /${interaction.commandName}`);
+
+        // Store context for replies
+        lastMessageContext = interaction;
+
+        try {
+            if (interaction.commandName === 'reset' || interaction.commandName === 'new') {
+                console.log(`🔄 ${interaction.commandName} command received, broadcasting reset payload`);
+                
+                // Both commands trigger a reset
+                broadcastToClients({
+                    type: 'command',
+                    command: 'reset'
+                });
+                
+                // Reply to the interaction
+                await interaction.reply({
+                    content: '✅ Task reset successfully. Ready for a new conversation!',
+                    ephemeral: true
+                });
+            } else {
+                // Unknown command
+                await interaction.reply({
+                    content: '❌ Unknown command.',
+                    ephemeral: true
+                });
+            }
+        } catch (error) {
+            console.error('❌ Error handling slash command:', error);
+            
+            // Try to reply with an error message if we haven't replied yet
+            try {
+                if (!interaction.replied && !interaction.deferred) {
+                    await interaction.reply({
+                        content: '❌ An error occurred while processing the command.',
+                        ephemeral: true
+                    });
+                }
+            } catch (replyError) {
+                console.error('❌ Error sending error reply:', replyError);
+            }
+        }
     }
     
     try {

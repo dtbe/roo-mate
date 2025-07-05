@@ -86,7 +86,7 @@ const MAX_RECONNECT_DELAY_MS = 30000;
 
 // Global state
 let activeTaskId: string | null = null;
-let webSocketClient: WebSocket | null = null;
+let wsClientInstance: WebSocketClient | null = null;
 let reconnectTimeout: NodeJS.Timeout | null = null;
 let reconnectDelay = RECONNECT_DELAY_MS;
 let isExtensionActive = true;
@@ -177,7 +177,7 @@ class WebSocketClient {
     }
 
     public connect(): void {
-        if (!isExtensionActive) return;
+        if (!isExtensionActive || this.ws) return; // Prevent multiple connections
 
         try {
             console.log('Attempting to connect to WebSocket server...');
@@ -370,12 +370,23 @@ export function activate(context: vscode.ExtensionContext) {
     
     isExtensionActive = true;
     
-    // Create and start WebSocket client
-    const wsClient = new WebSocketClient(context);
-    wsClient.connect();
+    // Ensure only one instance of the client is created (singleton)
+    if (!wsClientInstance) {
+        console.log('Creating new WebSocketClient instance.');
+        wsClientInstance = new WebSocketClient(context);
+        wsClientInstance.connect();
 
-    // Store client for cleanup
-    webSocketClient = wsClient as any;
+        // Cleanup on deactivation
+        context.subscriptions.push(new vscode.Disposable(() => {
+            if (wsClientInstance) {
+                wsClientInstance.disconnect();
+                wsClientInstance = null;
+            }
+        }));
+    } else {
+        console.log('WebSocketClient instance already exists. Reconnecting if necessary.');
+        wsClientInstance.connect(); // Attempt to connect if not already connected
+    }
 
     // Register commands if needed
     const disposable = vscode.commands.registerCommand('roo-lay.triggerRooCode', () => {
@@ -383,11 +394,6 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     context.subscriptions.push(disposable);
-    
-    // Cleanup on deactivation
-    context.subscriptions.push(new vscode.Disposable(() => {
-        wsClient.disconnect();
-    }));
 }
 
 export function deactivate() {
@@ -400,8 +406,8 @@ export function deactivate() {
         reconnectTimeout = null;
     }
     
-    if (webSocketClient) {
-        (webSocketClient as any).disconnect();
-        webSocketClient = null;
+    if (wsClientInstance) {
+        wsClientInstance.disconnect();
+        wsClientInstance = null;
     }
 }

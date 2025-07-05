@@ -3,10 +3,13 @@
   "displayName": "Roo Relay",
   "description": "VS Code extension to relay Discord messages to Roo Code LLM.",
   "version": "1.0.0",
-  "publisher": "your-publisher-name",
+  "publisher": "RooVeterinaryInc",
   "engines": {
     "vscode": "^1.80.0"
   },
+  "extensionDependencies": [
+    "RooVeterinaryInc.roo-cline"
+  ],
   "categories": [
     "Other"
   ],
