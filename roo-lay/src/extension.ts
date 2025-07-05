@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { EventEmitter } from 'events';
 import * as WebSocket from 'ws';
+import { createHash } from 'crypto';
 
 // Re-defining RooCodeEvents and RooCodeEventName based on roo-code.ts for self-containment
 export type RooCodeEvents = {
@@ -90,6 +91,9 @@ let wsClientInstance: WebSocketClient | null = null;
 let reconnectTimeout: NodeJS.Timeout | null = null;
 let reconnectDelay = RECONNECT_DELAY_MS;
 let isExtensionActive = true;
+let isResettingTask = false; // New flag to indicate if a reset command was issued
+const messageCache = new Map<string, number>();
+const CACHE_EXPIRATION_MS = 10000; // 10-second window to catch duplicates
 
 // Helper function to get Roo Code API
 function getRooCodeApi(): RooCodeAPI | undefined {
@@ -117,10 +121,36 @@ class WebSocketClient {
     }
 
     private setupRooCodeEventListeners(): void {
-        if (!this.rooCodeApi) return;
+        if (!this.rooCodeApi) {
+            console.warn('Roo Code API not available during event listener setup');
+            return;
+        }
 
         // Listen for messages from Roo Code API
         this.rooCodeApi.on(RooCodeEventName.Message, (event) => {
+            // --- Deduplication Logic ---
+            const textContent = event.message?.text || event.message?.reasoning || '';
+            const contentHash = createHash('sha256').update(textContent).digest('hex');
+            const eventId = event.message?.ts ? `${event.taskId}-${event.message.ts}-${contentHash}` : null;
+
+            if (eventId) {
+                const now = Date.now();
+                // Clean up old entries from the cache
+                for (const [id, timestamp] of messageCache.entries()) {
+                    if (now - timestamp > CACHE_EXPIRATION_MS) {
+                        messageCache.delete(id);
+                    }
+                }
+
+                // If the event is already in the cache, ignore it
+                if (messageCache.has(eventId)) {
+                    console.log(`[roo-lay] Duplicate message detected, not forwarding: ${eventId}`);
+                    return; // Stop processing the duplicate event
+                }
+                // Otherwise, add it to the cache
+                messageCache.set(eventId, now);
+            }
+
             this.sendToDiscord({
                 type: 'event',
                 eventName: 'message',
@@ -134,9 +164,7 @@ class WebSocketClient {
 
         // Listen for task completion
         this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId, usage) => {
-            if (taskId === activeTaskId) {
-                activeTaskId = null;
-            }
+            // Don't clear activeTaskId on task completion - only clear it on explicit reset
             this.sendToDiscord({
                 type: 'event',
                 eventName: 'taskCompleted',
@@ -149,6 +177,9 @@ class WebSocketClient {
 
         // Listen for other task events
         this.rooCodeApi.on(RooCodeEventName.TaskCreated, (taskId) => {
+            // Update activeTaskId when a new task is created
+            console.log(`Task created: ${taskId}, setting as activeTaskId`);
+            activeTaskId = taskId;
             this.sendToDiscord({
                 type: 'event',
                 eventName: 'taskCreated',
@@ -165,7 +196,9 @@ class WebSocketClient {
         });
 
         this.rooCodeApi.on(RooCodeEventName.TaskAborted, (taskId) => {
+            // Clear activeTaskId if it's the current task being aborted
             if (taskId === activeTaskId) {
+                console.log(`Task aborted: ${taskId}, clearing activeTaskId (reset: ${isResettingTask})`);
                 activeTaskId = null;
             }
             this.sendToDiscord({
@@ -260,31 +293,48 @@ class WebSocketClient {
             // Handle command messages (reset)
             if (message.type === 'command' && message.command === 'reset') {
                 console.log('Processing reset command from Discord');
+                isResettingTask = true; // Set the flag when a reset command is received
                 if (activeTaskId) {
                     await this.rooCodeApi.cancelCurrentTask();
-                    activeTaskId = null;
                     vscode.window.showInformationMessage('Active task cancelled by Discord reset command');
                 } else {
                     vscode.window.showInformationMessage('No active task to reset');
                 }
+                // Clear activeTaskId immediately after cancelling for reset commands
+                console.log('Clearing activeTaskId due to reset command');
+                activeTaskId = null;
+                isResettingTask = false; // Reset the flag after processing the command
                 return;
             }
 
             // Handle regular message
             if (message.type === 'message' && message.content) {
                 console.log('Processing message from Discord:', message.content);
+                console.log(`Current activeTaskId: ${activeTaskId}`);
                 
                 if (activeTaskId) {
                     // Send message to existing task
-                    await this.rooCodeApi.sendMessage(message.content);
-                    vscode.window.showInformationMessage('Message sent to active task');
+                    console.log(`Sending message to existing task: ${activeTaskId}`);
+                    try {
+                        await this.rooCodeApi.sendMessage(message.content);
+                        vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
+                    } catch (error) {
+                        console.error('Failed to send message to existing task:', error);
+                        vscode.window.showErrorMessage('Failed to send message to active task');
+                        // Don't clear activeTaskId here - let the TaskAborted event handle it
+                    }
                 } else {
                     // Start new task
-                    console.log('Starting new task with content:', message.content);
-                    activeTaskId = await this.rooCodeApi.startNewTask({
-                        text: message.content
-                    });
-                    vscode.window.showInformationMessage('New task started from Discord message');
+                    console.log('No active task, starting new task with content:', message.content);
+                    try {
+                        await this.rooCodeApi.startNewTask({
+                            text: message.content
+                        });
+                        vscode.window.showInformationMessage('New task started from Discord message');
+                    } catch (error) {
+                        console.error('Failed to start new task:', error);
+                        vscode.window.showErrorMessage('Failed to start new task from Discord message');
+                    }
                 }
                 return;
             }
@@ -295,28 +345,38 @@ class WebSocketClient {
                 
                 if (activeTaskId) {
                     // Send message to existing task
-                    await this.rooCodeApi.sendMessage(message.text, message.images);
-                    vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
+                    try {
+                        await this.rooCodeApi.sendMessage(message.text, message.images);
+                        vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
+                    } catch (error) {
+                        console.error('Failed to send legacy message to existing task:', error);
+                        vscode.window.showErrorMessage('Failed to send message to active task');
+                    }
                 } else {
                     // Start new task
-                    const config = this.rooCodeApi.getConfiguration();
-                    const updatedConfig = {
-                        ...config,
-                        mode: message.mode || 'ask',
-                        discordContext: {
-                            channelId: message.channelId,
-                            userId: message.userId,
-                            username: message.username
-                        }
-                    };
+                    try {
+                        const config = this.rooCodeApi.getConfiguration();
+                        const updatedConfig = {
+                            ...config,
+                            mode: message.mode || 'ask',
+                            discordContext: {
+                                channelId: message.channelId,
+                                userId: message.userId,
+                                username: message.username
+                            }
+                        };
 
-                    activeTaskId = await this.rooCodeApi.startNewTask({
-                        configuration: updatedConfig,
-                        text: message.text,
-                        images: message.images
-                    });
+                        const newTaskId = await this.rooCodeApi.startNewTask({
+                            configuration: updatedConfig,
+                            text: message.text,
+                            images: message.images
+                        });
 
-                    vscode.window.showInformationMessage(`New task started from Discord: ${activeTaskId}`);
+                        vscode.window.showInformationMessage(`New task started from Discord: ${newTaskId}`);
+                    } catch (error) {
+                        console.error('Failed to start new legacy task:', error);
+                        vscode.window.showErrorMessage('Failed to start new task from Discord message');
+                    }
                 }
                 return;
             }
@@ -348,6 +408,10 @@ class WebSocketClient {
         } else {
             console.warn('WebSocket not connected, cannot send message to Discord bot');
         }
+    }
+
+    public isConnected(): boolean {
+        return this.ws !== null && this.ws.readyState === WebSocket.WebSocket.OPEN;
     }
 
     public disconnect(): void {
@@ -384,8 +448,14 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }));
     } else {
-        console.log('WebSocketClient instance already exists. Reconnecting if necessary.');
-        wsClientInstance.connect(); // Attempt to connect if not already connected
+        console.log('WebSocketClient instance already exists.');
+        // Only reconnect if not currently connected
+        if (!wsClientInstance.isConnected()) {
+            console.log('Reconnecting existing WebSocketClient instance.');
+            wsClientInstance.connect();
+        } else {
+            console.log('WebSocketClient already connected.');
+        }
     }
 
     // Register commands if needed

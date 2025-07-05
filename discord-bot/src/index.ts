@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, Message, Interaction, TextChannel } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Message, Interaction, TextChannel, EmbedBuilder, MessageFlags } from 'discord.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as dotenv from 'dotenv';
 
@@ -36,32 +36,55 @@ const wss = new WebSocketServer({ port: WEBSOCKET_PORT });
 
 // Store connected WebSocket clients
 const connectedClients: Set<WebSocket> = new Set();
+const messageQueue: any[] = [];
 
 // Store the context of the last message to know where to reply
 let lastMessageContext: Message | Interaction | null = null;
+// Store an action that requires user approval
+let pendingAction: { type: 'command'; content: string } | null = null;
+
+// Debounce for batching related messages
+const messageProcessingTimers = new Map<string, NodeJS.Timeout>();
+const DEBOUNCE_DELAY_MS = 350; // ms to wait for more messages from the same task
 
 // Function to format event messages for Discord
-function formatEventForDiscord(eventName: string, data: any): string | null {
+function formatEventForDiscord(eventName: string, data: any): { content: string | null; embeds?: EmbedBuilder[] } {
     switch (eventName) {
         case 'message':
             const message = data.message;
 
             // Filter out noisy LiteLLM errors
             if (message.text && message.text.includes('Failed to fetch LiteLLM models')) {
-                return null; // Returning null will prevent the message from being sent
+                return { content: null };
             }
 
             if (message.say === 'reasoning') {
-                return `🤔 **Thinking...**\n\`\`\`\n${message.reasoning || message.text || 'Processing...'}\n\`\`\``;
+                return { content: `🤔 *${message.reasoning || message.text || 'Processing...'}*` };
             } else if (message.say === 'completion_result') {
-                return `✅ **Task Complete!**\n${message.text || 'Task completed successfully'}`;
+                const embed = new EmbedBuilder()
+                    .setColor(0x00FF00) // Green
+                    .setTitle('✅ Task Complete!')
+                    .setDescription(message.text || 'Task completed successfully.');
+                return { content: null, embeds: [embed] };
             } else if (message.say === 'tool') {
-                return `🛠️ **Using Tool:** \`${message.text || 'Unknown tool'}\``;
+                return { content: `🛠️ **Using Tool:** \`${message.text || 'Unknown tool'}\`` };
             } else if (message.say === 'text') {
-                return `💬 ${message.text || ''}`;
+                if (message.text && message.text.trim().length > 0) {
+                    return { content: message.text };
+                }
+                return { content: null };
             } else if (message.say === 'api_req_started') {
-                return `⏳ **Loading...**`;
+                return { content: null }; // Remove "Loading..." message
+            } else if (message.ask === 'completion_result' || message.ask === 'tool') {
+                return { content: null }; // This is an ack/internal message from the core, don't show it in Discord.
             } else if (message.ask === 'followup' || (message.ask && (message.choices || message.text?.startsWith('{')))) {
+                // Check if this is a command execution request that needs approval
+                const commandRegex = /^(npx|npm|git|yarn|pnpm|node|python|go|rustc|tsc|docker|kubectl|move|del|mkdir)\s/;
+                if (message.text && commandRegex.test(message.text)) {
+                    pendingAction = { type: 'command', content: message.text };
+                    return { content: `🤖 **Action Required**\nRoo wants to run the following command. Please use \`/approve\` or \`/deny\`.\n\`\`\`sh\n${message.text}\n\`\`\`` };
+                }
+                
                 try {
                     // Handle cases where the entire 'text' is a JSON string
                     if (message.text && message.text.trim().startsWith('{')) {
@@ -73,7 +96,7 @@ function formatEventForDiscord(eventName: string, data: any): string | null {
                                 formatted += `\n${index + 1}. ${choice.label || choice.answer}`;
                             });
                         }
-                        return formatted;
+                        return { content: formatted };
                     }
                 } catch (e) {
                     // Not a valid JSON, fall through to default handling
@@ -86,109 +109,112 @@ function formatEventForDiscord(eventName: string, data: any): string | null {
                         formatted += `\n${index + 1}. ${choice.label || choice.answer}`;
                     });
                 }
-                return formatted;
+                return { content: formatted };
             } else if (message.ask) {
-                return `❓ **Question:** ${message.text || ''}`;
+                return { content: `❓ **Question:** ${message.text || ''}` };
             } else {
                 // Fallback for unhandled message 'say' types
                 if (message.text) {
-                    return `📝 ${message.text}`;
+                    if (message.say === 'user_feedback' || message.say === 'user_feedback_diff') {
+                        return { content: null }; // Don't echo user's own message
+                    }
+                    return { content: message.text };
                 }
                 // Avoid sending raw JSON if possible
                 console.log("Unhandled message type, sending generic message:", message);
-                return `📝 Processing update...`;
+                return { content: `Processing update...` };
             }
         
         case 'taskCompleted':
-            const usage = data.usage;
-            const totalCost = usage?.totalCost || 0;
-            const tokensIn = usage?.totalTokensIn || 0;
-            const tokensOut = usage?.totalTokensOut || 0;
-            return `📊 **Task Complete!**\nTokens: ${tokensIn} in, ${tokensOut} out\nTotal cost: $${totalCost.toFixed(6)}`;
+            return { content: null }; // Remove noisy task completed message with stats
         
         case 'taskStarted':
-            return `🚀 **Task Started:** ${data.taskId}`;
+            return { content: `🚀 **Task Started:** ${data.taskId}` };
         
         case 'taskCreated':
-            return `📋 **Task Created:** ${data.taskId}`;
+            return { content: null }; // Remove noisy task created message
         
         case 'taskAborted':
-            return `❌ **Task Aborted:** ${data.taskId}`;
+            const embed = new EmbedBuilder()
+                .setColor(0xFF0000) // Red
+                .setTitle('❌ Task Aborted')
+                .setDescription(`Task \`${data.taskId}\` was aborted.`);
+            return { content: null, embeds: [embed] };
         
         default:
-            return `📡 **${eventName}:** ${JSON.stringify(data)}`;
+            return { content: `📡 **${eventName}:** ${JSON.stringify(data)}` };
     }
 }
 
 // Function to split long messages for Discord's 2000 character limit
 function splitMessage(message: string, maxLength: number = 2000): string[] {
-    if (message.length <= maxLength) {
-        return [message];
-    }
-    
     const chunks: string[] = [];
-    let currentChunk = '';
-    
-    // Split by lines first to preserve formatting
-    const lines = message.split('\n');
-    
-    for (const line of lines) {
-        if ((currentChunk + line + '\n').length > maxLength) {
-            if (currentChunk.trim()) {
-                chunks.push(currentChunk.trim());
-                currentChunk = '';
-            }
+    if (!message) {
+        return chunks;
+    }
+
+    // If message is short enough, return as-is
+    if (message.length <= maxLength) {
+        chunks.push(message);
+        return chunks;
+    }
+
+    let i = 0;
+    while (i < message.length) {
+        let endIndex = Math.min(i + maxLength, message.length);
+        
+        // If not at the end of the message, try to split at a reasonable point
+        if (endIndex < message.length) {
+            // Look for the last newline, space, or punctuation within the limit
+            const chunk = message.substring(i, endIndex);
+            const lastNewline = chunk.lastIndexOf('\n');
+            const lastSpace = chunk.lastIndexOf(' ');
+            const lastPunctuation = Math.max(chunk.lastIndexOf('.'), chunk.lastIndexOf('!'), chunk.lastIndexOf('?'));
             
-            // If a single line is too long, split it by words
-            if (line.length > maxLength) {
-                const words = line.split(' ');
-                let wordChunk = '';
-                
-                for (const word of words) {
-                    if ((wordChunk + word + ' ').length > maxLength) {
-                        if (wordChunk.trim()) {
-                            chunks.push(wordChunk.trim());
-                            wordChunk = '';
-                        }
-                        // If a single word is too long, just add it as is
-                        if (word.length > maxLength) {
-                            chunks.push(word);
-                        } else {
-                            wordChunk = word + ' ';
-                        }
-                    } else {
-                        wordChunk += word + ' ';
-                    }
-                }
-                
-                if (wordChunk.trim()) {
-                    currentChunk = wordChunk;
-                }
-            } else {
-                currentChunk = line + '\n';
+            // Prefer newline, then punctuation, then space
+            if (lastNewline > i + maxLength * 0.7) {
+                endIndex = i + lastNewline + 1;
+            } else if (lastPunctuation > i + maxLength * 0.7) {
+                endIndex = i + lastPunctuation + 1;
+            } else if (lastSpace > i + maxLength * 0.7) {
+                endIndex = i + lastSpace + 1;
             }
-        } else {
-            currentChunk += line + '\n';
         }
+        
+        chunks.push(message.substring(i, endIndex));
+        i = endIndex;
     }
-    
-    if (currentChunk.trim()) {
-        chunks.push(currentChunk.trim());
-    }
-    
     return chunks;
 }
 
 // Function to send a message to a specific channel
-async function sendMessageToChannel(channelId: string, content: string): Promise<void> {
+async function sendMessageToChannel(channelId: string, messageOptions: { content: string | null; embeds?: EmbedBuilder[] }): Promise<void> {
     try {
         const channel = await client.channels.fetch(channelId);
         if (channel && channel.isTextBased()) {
-            const messageParts = splitMessage(content);
-            for (const part of messageParts) {
-                // Cast to TextChannel after the type guard to satisfy the compiler
-                await (channel as TextChannel).send(part);
-                console.log(`📤 Sent message to channel #${(channel as any).name}`);
+            const { content, embeds } = messageOptions;
+
+            // Don't send if both content and embeds are empty
+            if (!content && (!embeds || embeds.length === 0)) {
+                return;
+            }
+
+            const messagePayload: any = {};
+            if (content) {
+                const messageParts = splitMessage(content);
+                // Send embeds only with the first part of a multi-part message
+                for (let i = 0; i < messageParts.length; i++) {
+                    const payload: any = { content: messageParts[i] };
+                    if (i === 0 && embeds) {
+                        payload.embeds = embeds;
+                    }
+                    await (channel as TextChannel).send(payload);
+                    console.log(`📤 Sent message to channel #${(channel as any).name}`);
+                }
+            } else if (embeds) {
+                messagePayload.embeds = embeds;
+                await (channel as TextChannel).send(messagePayload);
+                console.log(`📤 Sent embed to channel #${(channel as any).name}`);
             }
         } else {
             console.error(`❌ Channel ${channelId} not found or is not a text channel.`);
@@ -199,14 +225,33 @@ async function sendMessageToChannel(channelId: string, content: string): Promise
 }
 
 // Function to send a DM to a specific user
-async function sendDmToUser(userId: string, content: string): Promise<void> {
+async function sendDmToUser(userId: string, messageOptions: { content: string | null; embeds?: EmbedBuilder[] }): Promise<void> {
     try {
         const user = await client.users.fetch(userId);
         if (user) {
-            const messageParts = splitMessage(content);
-            for (const part of messageParts) {
-                await user.send(part);
-                console.log(`📤 Sent DM to user ${user.username}`);
+            const { content, embeds } = messageOptions;
+
+            // Don't send if both content and embeds are empty
+            if (!content && (!embeds || embeds.length === 0)) {
+                return;
+            }
+
+            const messagePayload: any = {};
+            if (content) {
+                const messageParts = splitMessage(content);
+                // Send embeds only with the first part of a multi-part message
+                for (let i = 0; i < messageParts.length; i++) {
+                    const payload: any = { content: messageParts[i] };
+                    if (i === 0 && embeds) {
+                        payload.embeds = embeds;
+                    }
+                    await user.send(payload);
+                    console.log(`📤 Sent DM to user ${user.username}`);
+                }
+            } else if (embeds) {
+                messagePayload.embeds = embeds;
+                await user.send(messagePayload);
+                console.log(`📤 Sent embed to user ${user.username}`);
             }
         } else {
             console.error(`❌ User ${userId} not found.`);
@@ -220,27 +265,67 @@ async function sendDmToUser(userId: string, content: string): Promise<void> {
 wss.on('connection', (ws: WebSocket) => {
     console.log('🔌 New WebSocket connection established');
     connectedClients.add(ws);
+
+    // Send any queued messages
+    if (messageQueue.length > 0) {
+        console.log(`📬 Sending ${messageQueue.length} queued message(s).`);
+        messageQueue.forEach(msg => {
+            ws.send(JSON.stringify(msg));
+        });
+        // Clear the queue
+        messageQueue.length = 0;
+    }
     
     ws.on('message', async (data) => {
         try {
             const message = JSON.parse(data.toString());
             console.log('📨 Received WebSocket message:', message);
-
-            // Ignore partial message updates to prevent spam
-            if (message.data?.message?.partial === true) {
-                return;
-            }
             
-            // Handle event messages from roo-lay extension
-            if (message.type === 'event' && lastMessageContext) {
+            // --- Debounce Logic for Streaming Messages ---
+            const taskId = message.data?.taskId;
+            const isStreamingMessage = message.type === 'event' && message.eventName === 'message' &&
+                                       (message.data?.message?.partial === true ||
+                                        message.data?.message?.say === 'reasoning' ||
+                                        message.data?.message?.say === 'text');
+
+            if (taskId && isStreamingMessage) {
+                if (messageProcessingTimers.has(taskId)) {
+                    clearTimeout(messageProcessingTimers.get(taskId)!);
+                }
+
+                const timer = setTimeout(async () => {
+                    messageProcessingTimers.delete(taskId);
+                    // Only process the last received message for this taskId
+                    if (lastMessageContext) {
+                        const formattedMessage = formatEventForDiscord(message.eventName, message.data);
+                        if (formattedMessage) {
+                            if (lastMessageContext.guild && lastMessageContext.channelId) {
+                                await sendMessageToChannel(lastMessageContext.channelId, formattedMessage);
+                            } else {
+                                const userId = 'user' in lastMessageContext ? lastMessageContext.user.id : lastMessageContext.author.id;
+                                await sendDmToUser(userId, formattedMessage);
+                            }
+                        }
+                    }
+                }, DEBOUNCE_DELAY_MS);
+                
+                messageProcessingTimers.set(taskId, timer);
+            } else if (message.type === 'event' && lastMessageContext) {
+                // Clean up timers for completed/aborted tasks
+                if ((message.eventName === 'taskCompleted' || message.eventName === 'taskAborted') && taskId) {
+                    if (messageProcessingTimers.has(taskId)) {
+                        clearTimeout(messageProcessingTimers.get(taskId)!);
+                        messageProcessingTimers.delete(taskId);
+                        console.log(`🧹 Cleaned up timer for ${message.eventName}: ${taskId}`);
+                    }
+                }
+
+                // Handle all other non-streaming events immediately
                 const formattedMessage = formatEventForDiscord(message.eventName, message.data);
-                // Only send if the message is not filtered out (is not null)
                 if (formattedMessage) {
                     if (lastMessageContext.guild && lastMessageContext.channelId) {
-                        // It was a channel message
                         await sendMessageToChannel(lastMessageContext.channelId, formattedMessage);
                     } else {
-                        // It was a DM
                         const userId = 'user' in lastMessageContext ? lastMessageContext.user.id : lastMessageContext.author.id;
                         await sendDmToUser(userId, formattedMessage);
                     }
@@ -272,6 +357,12 @@ wss.on('connection', (ws: WebSocket) => {
 // Function to broadcast message to all connected WebSocket clients
 function broadcastToClients(data: any) {
     const message = JSON.stringify(data);
+
+    if (connectedClients.size === 0) {
+        console.log('🔌 No clients connected, queueing message.');
+        messageQueue.push(data);
+        return;
+    }
     
     connectedClients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
@@ -333,25 +424,83 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         lastMessageContext = interaction;
 
         try {
-            if (interaction.commandName === 'reset' || interaction.commandName === 'new') {
-                console.log(`🔄 ${interaction.commandName} command received, broadcasting reset payload`);
-                
-                // Both commands trigger a reset
+            if (interaction.commandName === 'reset') {
+                console.log(`🔄 reset command received, broadcasting reset payload`);
                 broadcastToClients({
                     type: 'command',
                     command: 'reset'
                 });
-                
-                // Reply to the interaction
                 await interaction.reply({
                     content: '✅ Task reset successfully. Ready for a new conversation!',
-                    ephemeral: true
+                    flags: [MessageFlags.Ephemeral]
                 });
+            } else if (interaction.commandName === 'new') {
+                const messageContent = interaction.options.getString('message', true); // Now required
+
+                console.log(`🔄 new command received, broadcasting reset and message payload`);
+                
+                // 1. Reset the state
+                broadcastToClients({
+                    type: 'command',
+                    command: 'reset'
+                });
+
+                // 2. Send the new message after a short delay
+                // This helps ensure the reset is processed before the new task starts
+                setTimeout(() => {
+                    broadcastToClients({
+                        type: 'message',
+                        content: messageContent
+                    });
+                }, 150);
+
+                await interaction.reply({
+                    content: `🚀 New task started with your message!`,
+                    flags: [MessageFlags.Ephemeral]
+                });
+            } else if (interaction.commandName === 'approve') {
+                if (pendingAction) {
+                    console.log(`👍 Approving action:`, pendingAction);
+                    // Send a 'yes' response back to the core to confirm the action
+                    broadcastToClients({
+                        type: 'message',
+                        content: 'yes'
+                    });
+                    pendingAction = null;
+                    await interaction.reply({
+                        content: '✅ Action approved and sent to Roo.',
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                } else {
+                    await interaction.reply({
+                        content: '🤷 No action pending approval.',
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
+            } else if (interaction.commandName === 'deny') {
+                if (pendingAction) {
+                    console.log(`👎 Denying action:`, pendingAction);
+                     // Send a 'no' response back to the core to deny the action
+                    broadcastToClients({
+                        type: 'message',
+                        content: 'no'
+                    });
+                    pendingAction = null;
+                    await interaction.reply({
+                        content: '❌ Action denied.',
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                } else {
+                    await interaction.reply({
+                        content: '🤷 No action pending approval.',
+                        flags: [MessageFlags.Ephemeral]
+                    });
+                }
             } else {
                 // Unknown command
                 await interaction.reply({
                     content: '❌ Unknown command.',
-                    ephemeral: true
+                    flags: [MessageFlags.Ephemeral]
                 });
             }
         } catch (error) {
@@ -362,50 +511,12 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                 if (!interaction.replied && !interaction.deferred) {
                     await interaction.reply({
                         content: '❌ An error occurred while processing the command.',
-                        ephemeral: true
+                        flags: [MessageFlags.Ephemeral]
                     });
                 }
             } catch (replyError) {
                 console.error('❌ Error sending error reply:', replyError);
             }
-        }
-    }
-    
-    try {
-        if (interaction.commandName === 'reset' || interaction.commandName === 'new') {
-            console.log(`🔄 ${interaction.commandName} command received, broadcasting reset payload`);
-            
-            // Both commands trigger a reset
-            broadcastToClients({
-                type: 'command',
-                command: 'reset'
-            });
-            
-            // Reply to the interaction
-            await interaction.reply({
-                content: '✅ Task reset successfully. Ready for a new conversation!',
-                ephemeral: true
-            });
-        } else {
-            // Unknown command
-            await interaction.reply({
-                content: '❌ Unknown command.',
-                ephemeral: true
-            });
-        }
-    } catch (error) {
-        console.error('❌ Error handling slash command:', error);
-        
-        // Try to reply with an error message if we haven't replied yet
-        try {
-            if (!interaction.replied && !interaction.deferred) {
-                await interaction.reply({
-                    content: '❌ An error occurred while processing the command.',
-                    ephemeral: true
-                });
-            }
-        } catch (replyError) {
-            console.error('❌ Error sending error reply:', replyError);
         }
     }
 });

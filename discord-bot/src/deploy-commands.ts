@@ -36,6 +36,24 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
         name: 'new',
         description: 'Starts a new conversation with Roo Code. Use this if the bot seems stuck or to begin a fresh topic.',
         type: ApplicationCommandType.ChatInput,
+        options: [
+            {
+                name: 'message',
+                description: 'The initial message to start the new task.',
+                type: 3, // ApplicationCommandOptionType.String
+                required: true,
+            },
+        ],
+    },
+    {
+        name: 'approve',
+        description: 'Approves the last requested action from Roo.',
+        type: ApplicationCommandType.ChatInput,
+    },
+    {
+        name: 'deny',
+        description: 'Denies the last requested action from Roo.',
+        type: ApplicationCommandType.ChatInput,
     },
 ];
 
