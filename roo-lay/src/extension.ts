@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path'; 
 import { EventEmitter } from 'events';
+import * as WebSocket from 'ws';
 
 // Re-defining RooCodeEvents and RooCodeEventName based on roo-code.ts for self-containment
 export type RooCodeEvents = {
@@ -73,321 +72,336 @@ export enum RooCodeEventName {
 
 // Assuming Roo Code API is exposed via an extension export
 interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
-  startNewTask(options: { configuration?: any; text?: string; images?: string[] }): Promise<string>;
-  sendMessage(text?: string, images?: string[]): Promise<void>;
-  cancelCurrentTask(): Promise<void>;
-  getConfiguration(): any; // Should be RooCodeSettings from roo-code.ts
-  handleWebviewAskResponse(askResponse: any, text?: string, images?: string[]): Promise<void>; // Add handleWebviewAskResponse
-  // Add other methods from RooCodeAPI as needed
+    startNewTask(options: { configuration?: any; text?: string; images?: string[] }): Promise<string>;
+    sendMessage(text?: string, images?: string[]): Promise<void>;
+    cancelCurrentTask(): Promise<void>;
+    getConfiguration(): any;
+    handleWebviewAskResponse(askResponse: any, text?: string, images?: string[]): Promise<void>;
 }
 
-// Path to the watched file
-const WATCHED_FILE_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'commands.json');
-const WEB_TERMINAL_RESPONSES_PATH = path.join(vscode.workspace.rootPath || '', '00-Repositories', '00', 'roo-mate', 'interface', 'responses.json');
+// WebSocket configuration
+const WEBSOCKET_URL = 'ws://localhost:8080';
+const RECONNECT_DELAY_MS = 3000;
+const MAX_RECONNECT_DELAY_MS = 30000;
 
+// Global state
 let activeTaskId: string | null = null;
-let messageHandlerRegistered: boolean = false;
+let webSocketClient: WebSocket | null = null;
+let reconnectTimeout: NodeJS.Timeout | null = null;
+let reconnectDelay = RECONNECT_DELAY_MS;
+let isExtensionActive = true;
 
 // Helper function to get Roo Code API
 function getRooCodeApi(): RooCodeAPI | undefined {
-  const extension = vscode.extensions.getExtension<RooCodeAPI>("rooveterinaryinc.roo-cline"); // Assuming this is the correct extension ID
-  if (!extension) {
-    vscode.window.showErrorMessage("Roo Code extension not found. Please install 'rooveterinaryinc.roo-cline'.");
-    return undefined;
-  }
-  if (!extension.isActive) {
-    extension.activate(); // Try to activate if not active
-  }
-  return extension.exports;
+    const extension = vscode.extensions.getExtension<RooCodeAPI>("rooveterinaryinc.roo-cline");
+    if (!extension) {
+        vscode.window.showErrorMessage("Roo Code extension not found. Please install 'rooveterinaryinc.roo-cline'.");
+        return undefined;
+    }
+    if (!extension.isActive) {
+        extension.activate();
+    }
+    return extension.exports;
 }
 
-// Message instruction builder (simplified for now, can be expanded)
-class MessageInstructionBuilder {
-    private header: string[] = [];
-    private conversationContext: string = '';
-    private assistantInstructions: string[] = [];
-    private currentMessage: string = '';
-    private ttsInstructions: string[] | undefined;
+// WebSocket client implementation
+class WebSocketClient {
+    private ws: WebSocket.WebSocket | null = null;
+    private context: vscode.ExtensionContext;
+    private rooCodeApi: RooCodeAPI | undefined;
 
-    addHeader(payload: any, source: 'discord' | 'web-terminal'): this {
-        if (source === 'discord') {
-            this.header = [
-                `SOURCE=DISCORD`,
-                `DISCORD_CHANNEL_ID=${payload.discord.channelId}`,
-                `DISCORD_USER_NAME=${payload.discord.authorUsername}`,
-                `DISCORD_MESSAGE_ID=${payload.discord.messageContent}`, // Assuming messageContent is unique enough for ID
-                `IS_DIRECT_MENTION=true`, // Assuming all triggers are direct mentions for now
-                `HAS_TTS=${payload.discord.ttsRequested}`
-            ];
-        } else if (source === 'web-terminal') {
-            this.header = [
-                `SOURCE=WEB_TERMINAL`,
-                `WEB_TERMINAL_COMMAND=${payload.command}`,
-                `WEB_TERMINAL_TIMESTAMP=${payload.timestamp}`
-            ];
-        }
-        return this;
+    constructor(context: vscode.ExtensionContext) {
+        this.context = context;
+        this.rooCodeApi = getRooCodeApi();
+        this.setupRooCodeEventListeners();
     }
 
-    addHistory(recentMessages: any[], source: 'discord' | 'web-terminal'): this {
-        if (source === 'discord') {
-            const historyText = recentMessages
-                .map((msg: any, i: number) => `MESSAGE_${i + 1} [${msg.timestamp}]: ${msg.authorUsername}: ${msg.content}`)
-                .join('\n');
-            
-            this.conversationContext = `## CONVERSATION CONTEXT (Last ${recentMessages.length} Messages)\n${historyText}`;
-        } else if (source === 'web-terminal') {
-            // For web terminal, history might be managed differently or not needed in the same way
-            this.conversationContext = `## WEB TERMINAL CONTEXT\nNo specific history provided, process current command.`;
-        }
-        return this;
-    }
+    private setupRooCodeEventListeners(): void {
+        if (!this.rooCodeApi) return;
 
-    addInstructions(source: 'discord' | 'web-terminal'): this {
-        this.assistantInstructions = [
-            '## ASSISTANT INSTRUCTIONS',
-            '1. **Initial Micro-Planning (CRITICAL):** Before responding, create a brief internal plan:',
-            '   - **Assess Research Need:** Does this query require external research (Perplexity, Firecrawl, BraveSearch, Tavily) to provide a comprehensive and accurate answer? If yes, outline the research steps.',
-            '   - **Priorise Research:** If research is needed, perform ALL necessary research and analysis BEFORE sending ANY response.',
-            '   - **Formulate Single Answer:** Based on all available information (including research results), formulate a single, comprehensive answer.',
-            '',
-            '2. Response Guidelines:',
-        ];
-
-        if (source === 'discord') {
-            this.assistantInstructions.push(
-                '   - If you decide to respond, you MUST use mcp-discord to send your response:',
-                '     * channel: [Use DISCORD_CHANNEL_ID from header]',
-                '     * message: [Your single, comprehensive response in British English]',
-                '   - After sending your SINGLE final response via mcp-discord, you MUST use `attempt_completion` to signal the end of this task instance. Do NOT send multiple messages for one query.',
-                '   - If you want to ask a follow-up question:',
-                '     * Use mcp-discord with a clear question',
-                '     * Never ask questions directly in the response text',
-                '   - Keep messages under 1900 characters.',
-                '   - Match conversation tone.',
-                '   - React with 🦘 for direct mentions.',
-                '   - NEVER respond without using mcp-discord - always use it to send messages.'
-            );
-        } else if (source === 'web-terminal') {
-            this.assistantInstructions.push(
-                `   - Formulate your single, comprehensive response in British English.`,
-                `   - After formulating your response, you MUST use \`attempt_completion\` to signal the end of this task instance. Do NOT send multiple responses for one query.`,
-                `   - If you want to ask a follow-up question, include it in your final response.`
-            );
-        }
-        return this;
-    }
-
-    addMessage(content: string): this {
-        this.currentMessage = `## CURRENT MESSAGE\n${content}`;
-        return this;
-    }
-
-    addOptionalTts(ttsRequested: boolean): this {
-        if (ttsRequested) {
-            this.ttsInstructions = [
-                '',
-                '### TTS (Text-to-Speech) OPTION',
-                'TTS was explicitly requested (-tts flag). Use mcp-discord to send TTS:',
-                '- channel: [Use DISCORD_CHANNEL_ID from header]',
-                '- tts: true',
-                '- message: "[Shorter version of your response, optimised for speech]"',
-                '',
-                'TTS Guidelines:',
-                '- Keep TTS version under 200 characters',
-                '- Remove formatting and special characters',
-                '- Use conversational tone',
-                '- Focus on key points only',
-                '- This TTS was explicitly requested with -tts'
-            ];
-        }
-        return this;
-    }
-
-    toString(): string {
-        const parts = [
-            this.header.join('\n'),
-            this.conversationContext,
-            this.assistantInstructions.join('\n'),
-            this.currentMessage
-        ];
-
-        if (this.ttsInstructions) {
-            parts.push(this.ttsInstructions.join('\n'));
-        }
-
-        return parts.join('\n\n');
-    }
-}
-
-
-export function activate(context: vscode.ExtensionContext) {
-  console.log('Congratulations, "roo-lay" is now active!');
-
-  // Ensure the watched file exists, or create it
-  if (!fs.existsSync(WATCHED_FILE_PATH)) {
-    fs.writeFileSync(WATCHED_FILE_PATH, '');
-  }
-
-  // Watch the file for changes
-  fs.watch(WATCHED_FILE_PATH, async (eventType: fs.WatchEventType, filename: string | null) => { // Corrected filename type
-    if (eventType === 'change') {
-      console.log(`Watched file changed: ${filename}`);
-      try {
-        const fileContent = fs.readFileSync(WATCHED_FILE_PATH, 'utf8');
-        const lines = fileContent.split('\n').filter(line => line.trim() !== '');
-        if (lines.length === 0) {
-            return; // No new commands
-        }
-        const lastLine = lines[lines.length - 1];
-        const payload = JSON.parse(lastLine); // Assuming each line is a JSON object
-
-        // Clear the commands.json file after reading the last command
-        fs.writeFileSync(WATCHED_FILE_PATH, '');
-
-        const rooCodeApi = getRooCodeApi();
-        if (!rooCodeApi) {
-          vscode.window.showErrorMessage("Roo Code API not available. Cannot trigger LLM.");
-          return;
-        }
-
-        if (payload.command === '.reset') {
-            if (activeTaskId) {
-                await rooCodeApi.cancelCurrentTask();
-                activeTaskId = null; // Reset for a clean start
-            }
-            messageHandlerRegistered = false;
-            vscode.window.showInformationMessage(`Terminal reset.`);
-            return;
-        }
-
-        if (payload.command === '.mode') {
-            const modeSlug = payload.mode;
-            try {
-                // Send mode change message using the same format as the UI
-                await rooCodeApi.sendMessage(JSON.stringify({
-                    type: "mode",
-                    text: modeSlug,
-                }));
-                vscode.window.showInformationMessage(`Mode changed to '${modeSlug}'.`);
-            } catch (error: unknown) {
-                if (error instanceof Error) {
-                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': ${error.message}`);
-                } else {
-                    vscode.window.showErrorMessage(`Failed to change mode to '${modeSlug}': An unknown error occurred.`);
+        // Listen for messages from Roo Code API
+        this.rooCodeApi.on(RooCodeEventName.Message, (event) => {
+            this.sendToDiscord({
+                type: 'event',
+                eventName: 'message',
+                data: {
+                    taskId: event.taskId,
+                    action: event.action,
+                    message: event.message
                 }
+            });
+        });
+
+        // Listen for task completion
+        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId, usage) => {
+            if (taskId === activeTaskId) {
+                activeTaskId = null;
             }
-            return;
-        }
+            this.sendToDiscord({
+                type: 'event',
+                eventName: 'taskCompleted',
+                data: {
+                    taskId,
+                    usage
+                }
+            });
+        });
 
-        // Handle askResponse from web terminal
-        if (payload.command === '/askResponse') {
-            if (activeTaskId && rooCodeApi.handleWebviewAskResponse) {
-                const askResponse = payload.askResponse;
-                const text = payload.text;
-                const images = payload.images;
-                await rooCodeApi.handleWebviewAskResponse(askResponse, text, images);
-                vscode.window.showInformationMessage(`Response sent to Roo Code API.`);
-            } else {
-                vscode.window.showErrorMessage(`Cannot send ask response: no active task or API not ready.`);
+        // Listen for other task events
+        this.rooCodeApi.on(RooCodeEventName.TaskCreated, (taskId) => {
+            this.sendToDiscord({
+                type: 'event',
+                eventName: 'taskCreated',
+                data: { taskId }
+            });
+        });
+
+        this.rooCodeApi.on(RooCodeEventName.TaskStarted, (taskId) => {
+            this.sendToDiscord({
+                type: 'event',
+                eventName: 'taskStarted',
+                data: { taskId }
+            });
+        });
+
+        this.rooCodeApi.on(RooCodeEventName.TaskAborted, (taskId) => {
+            if (taskId === activeTaskId) {
+                activeTaskId = null;
             }
-            return;
-        }
+            this.sendToDiscord({
+                type: 'event',
+                eventName: 'taskAborted',
+                data: { taskId }
+            });
+        });
+    }
 
+    public connect(): void {
+        if (!isExtensionActive) return;
 
-        if (activeTaskId) {
-            await rooCodeApi.sendMessage(payload.command);
-            vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
-        } else {
-            let taskInstructions: string;
-            let updatedConfig: any;
-            let source: 'discord' | 'web-terminal';
-    
-            if (payload.command) {
-                source = 'web-terminal';
-                const instructionBuilder = new MessageInstructionBuilder()
-                    .addHeader(payload, source)
-                    .addHistory([], source) 
-                    .addInstructions(source)
-                    .addMessage(payload.command);
-                taskInstructions = instructionBuilder.toString();
-                updatedConfig = {
-                    ...rooCodeApi.getConfiguration(),
-                    mode: 'ask', 
-                    webTerminalContext: { 
-                        command: payload.command,
-                        timestamp: payload.timestamp,
+        try {
+            console.log('Attempting to connect to WebSocket server...');
+            this.ws = new WebSocket.WebSocket(WEBSOCKET_URL);
+
+            if (this.ws) {
+                this.ws.on('open', () => {
+                    console.log('WebSocket connected to Discord bot');
+                    vscode.window.showInformationMessage('Connected to Discord bot');
+                    reconnectDelay = RECONNECT_DELAY_MS; // Reset delay on successful connection
+                    
+                    // Clear any pending reconnect timeout
+                    if (reconnectTimeout) {
+                        clearTimeout(reconnectTimeout);
+                        reconnectTimeout = null;
                     }
-                };
-            } else {
-                console.warn('Unknown payload format in watched file:', payload);
+                });
+
+                this.ws.on('message', (data: WebSocket.RawData) => {
+                    try {
+                        const message = JSON.parse(data.toString());
+                        this.handleDiscordMessage(message);
+                    } catch (error) {
+                        console.error('Error parsing WebSocket message:', error);
+                        vscode.window.showErrorMessage('Error parsing message from Discord bot');
+                    }
+                });
+
+                this.ws.on('close', (code: number, reason: string) => {
+                    console.log(`WebSocket connection closed: ${code} ${reason}`);
+                    this.ws = null;
+                    
+                    if (isExtensionActive) {
+                        this.scheduleReconnect();
+                    }
+                });
+
+                this.ws.on('error', (error: Error) => {
+                    console.error('WebSocket error:', error);
+                    vscode.window.showErrorMessage(`WebSocket error: ${error.message}`);
+                    this.ws = null;
+                    
+                    if (isExtensionActive) {
+                        this.scheduleReconnect();
+                    }
+                });
+            }
+
+        } catch (error) {
+            console.error('Failed to create WebSocket connection:', error);
+            if (isExtensionActive) {
+                this.scheduleReconnect();
+            }
+        }
+    }
+
+    private scheduleReconnect(): void {
+        if (reconnectTimeout) return; // Already scheduled
+
+        console.log(`Scheduling reconnect in ${reconnectDelay}ms`);
+        reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            if (isExtensionActive) {
+                this.connect();
+                // Exponential backoff with max delay
+                reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT_DELAY_MS);
+            }
+        }, reconnectDelay);
+    }
+
+    private async handleDiscordMessage(message: any): Promise<void> {
+        if (!this.rooCodeApi) {
+            console.error('Roo Code API not available');
+            return;
+        }
+
+        try {
+            console.log('Received Discord message:', message);
+
+            // Handle command messages (reset)
+            if (message.type === 'command' && message.command === 'reset') {
+                console.log('Processing reset command from Discord');
+                if (activeTaskId) {
+                    await this.rooCodeApi.cancelCurrentTask();
+                    activeTaskId = null;
+                    vscode.window.showInformationMessage('Active task cancelled by Discord reset command');
+                } else {
+                    vscode.window.showInformationMessage('No active task to reset');
+                }
                 return;
             }
-    
-            activeTaskId = await rooCodeApi.startNewTask({
-                configuration: updatedConfig,
-                text: taskInstructions
-            });
-    
-            vscode.window.showInformationMessage(`New task started! Task ID: ${activeTaskId}`);
-            
-            // Only register message handler if not already registered
-            if (!messageHandlerRegistered) {
-                const messageHandler = (event: any) => {
-                    if (event.taskId === activeTaskId) {
-                        let existingResponses: { messages: any[] } = { messages: [] };
-                        try {
-                            const responsesContent = fs.readFileSync(WEB_TERMINAL_RESPONSES_PATH, 'utf8');
-                            existingResponses = JSON.parse(responsesContent);
-                        } catch (readError) {
-                            console.warn(`Could not read existing responses.json: ${readError}. Starting fresh.`);
-                        }
 
-                        if (event.message.type === 'say' && event.message.say === 'completion_result') {
-                            const llmResponse = event.message.text;
-                            if (llmResponse) {
-                                existingResponses.messages.push({ type: 'say', content: llmResponse });
-                                fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
-                            }
-                        } else if (event.message.type === 'ask') {
-                            const askMessage = {
-                                type: 'ask',
-                                text: event.message.text,
-                                choices: event.message.choices,
-                                askType: event.message.ask,
-                            };
-                            existingResponses.messages.push(askMessage);
-                            fs.writeFileSync(WEB_TERMINAL_RESPONSES_PATH, JSON.stringify(existingResponses, null, 2));
-                        }
-                    }
-                };
-                rooCodeApi.on(RooCodeEventName.Message, messageHandler);
-                messageHandlerRegistered = true;
-
-                const completionHandler = (completedTaskId: string) => {
-                    if (completedTaskId === activeTaskId) {
-                        // Don't reset activeTaskId to maintain conversation continuity
-                        // Only remove event listeners to prevent memory leaks
-                        messageHandlerRegistered = false;
-                        rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler);
-                        rooCodeApi.off(RooCodeEventName.Message, messageHandler);
-                    }
-                };
-                rooCodeApi.on(RooCodeEventName.TaskCompleted, completionHandler);
-
-                context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.Message, messageHandler)));
-                context.subscriptions.push(new vscode.Disposable(() => rooCodeApi.off(RooCodeEventName.TaskCompleted, completionHandler)));
+            // Handle regular message
+            if (message.type === 'message' && message.content) {
+                console.log('Processing message from Discord:', message.content);
+                
+                if (activeTaskId) {
+                    // Send message to existing task
+                    await this.rooCodeApi.sendMessage(message.content);
+                    vscode.window.showInformationMessage('Message sent to active task');
+                } else {
+                    // Start new task
+                    console.log('Starting new task with content:', message.content);
+                    activeTaskId = await this.rooCodeApi.startNewTask({
+                        text: message.content
+                    });
+                    vscode.window.showInformationMessage('New task started from Discord message');
+                }
+                return;
             }
+
+            // Handle legacy message format (for backwards compatibility)
+            if (message.text) {
+                console.log('Processing legacy message format:', message.text);
+                
+                if (activeTaskId) {
+                    // Send message to existing task
+                    await this.rooCodeApi.sendMessage(message.text, message.images);
+                    vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
+                } else {
+                    // Start new task
+                    const config = this.rooCodeApi.getConfiguration();
+                    const updatedConfig = {
+                        ...config,
+                        mode: message.mode || 'ask',
+                        discordContext: {
+                            channelId: message.channelId,
+                            userId: message.userId,
+                            username: message.username
+                        }
+                    };
+
+                    activeTaskId = await this.rooCodeApi.startNewTask({
+                        configuration: updatedConfig,
+                        text: message.text,
+                        images: message.images
+                    });
+
+                    vscode.window.showInformationMessage(`New task started from Discord: ${activeTaskId}`);
+                }
+                return;
+            }
+
+            // Handle ask response (existing functionality)
+            if (message.type === 'askResponse' && activeTaskId) {
+                await this.rooCodeApi.handleWebviewAskResponse(
+                    message.askResponse,
+                    message.text,
+                    message.images
+                );
+                return;
+            }
+
+            console.warn('Unhandled Discord message format:', message);
+        } catch (error) {
+            console.error('Error handling Discord message:', error);
+            vscode.window.showErrorMessage(`Error processing Discord message: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    private sendToDiscord(data: any): void {
+        if (this.ws && this.ws.readyState === WebSocket.WebSocket.OPEN) {
+            try {
+                this.ws.send(JSON.stringify(data));
+            } catch (error) {
+                console.error('Error sending message to Discord bot:', error);
+            }
+        } else {
+            console.warn('WebSocket not connected, cannot send message to Discord bot');
+        }
+    }
+
+    public disconnect(): void {
+        isExtensionActive = false;
+        
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
         }
 
-      } catch (error) {
-        console.error('Error processing watched file:', error);
-        vscode.window.showErrorMessage('Error processing message for Roo Code LLM.');
-      }
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
     }
-  });
+}
+
+export function activate(context: vscode.ExtensionContext) {
+    console.log('Congratulations, "roo-lay" is now active!');
+    
+    isExtensionActive = true;
+    
+    // Create and start WebSocket client
+    const wsClient = new WebSocketClient(context);
+    wsClient.connect();
+
+    // Store client for cleanup
+    webSocketClient = wsClient as any;
+
+    // Register commands if needed
+    const disposable = vscode.commands.registerCommand('roo-lay.triggerRooCode', () => {
+        vscode.window.showInformationMessage('Roo Relay is active and connected via WebSocket');
+    });
+
+    context.subscriptions.push(disposable);
+    
+    // Cleanup on deactivation
+    context.subscriptions.push(new vscode.Disposable(() => {
+        wsClient.disconnect();
+    }));
 }
 
 export function deactivate() {
-  console.log('"roo-lay" is now deactivated!');
+    console.log('"roo-lay" is now deactivated!');
+    
+    isExtensionActive = false;
+    
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+    
+    if (webSocketClient) {
+        (webSocketClient as any).disconnect();
+        webSocketClient = null;
+    }
 }
