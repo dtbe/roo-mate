@@ -2,7 +2,107 @@
   "messages": [
     {
       "type": "say",
-      "content": "I have received your test message from the new interface."
+      "content": "[text] SOURCE=WEB_TERMINAL\nWEB_TERMINAL_COMMAND=I'm just testing the UI, please ask a followup qiestion\nWEB_TERMINAL_TIMESTAMP=1751228302.5435228\n\n## WEB TERMINAL CONTEXT\nNo specific history provided, process current command.\n\n## ASSISTANT INSTRUCTIONS\n1. **Initial Micro-Planning (CRITICAL):** Before responding, create a brief internal plan:\n   - **Assess Research Need:** Does this query require external research (Perplexity, Firecrawl, BraveSearch, Tavily) to provide a comprehensive and accurate answer? If yes, outline the research steps.\n   - **Priorise Research:** If research is needed, perform ALL necessary research and analysis BEFORE sending ANY response.\n   - **Formulate Single Answer:** Based on all available information (including research results), formulate a single, comprehensive answer.\n\n2. Response Guidelines:\n   - Formulate your single, comprehensive response in British English.\n   - After formulating your response, you MUST use `attempt_completion` to signal the end of this task instance. Do NOT send multiple responses for one query.\n   - If you want to ask a follow-up question, include it in your final response.\n\n## CURRENT MESSAGE\nI'm just testing the UI, please ask a followup qiestion"
+    },
+    {
+      "type": "say",
+      "content": "[api_req_started] {\"request\":\"<task>\\nSOURCE=WEB_TERMINAL\\nWEB_TERMINAL_COMMAND=I'm just testing the UI, please ask a followup qiestion\\nWEB_TERMINAL_TIMESTAMP=1751228302.5435228\\n\\n## WEB TERMINAL CONTEXT\\nNo specific history provided, process current command.\\n\\n## ASSISTANT INSTRUCTIONS\\n1. **Initial Micro-Planning (CRITICAL):** Before responding, create a brief internal plan:\\n   - **Assess Research Need:** Does this query require external research (Perplexity, Firecrawl, BraveSearch, Tavily) to provide a comprehensive and accurate answer? If yes, outline the research steps.\\n   - **Priorise Research:** If research is needed, perform ALL necessary research and analysis BEFORE sending ANY response.\\n   - **Formulate Single Answer:** Based on all available information (including research results), formulate a single, comprehensive answer.\\n\\n2. Response Guidelines:\\n   - Formulate your single, comprehensive response in British English.\\n   - After formulating your response, you MUST use `attempt_completion` to signal the end of this task instance. Do NOT send multiple responses for one query.\\n   - If you want to ask a follow-up question, include it in your final response.\\n\\n## CURRENT MESSAGE\\nI'm just testing the UI, please ask a followup qiestion\\n</task>\\n\\nLoading...\"}"
+    },
+    {
+      "type": "ask",
+      "text": "This is a test of",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "This is a test of the follow-up question UI. How would you like to proceed?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "This is a test of the follow-up question UI. How would you like to proceed?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "This is a test of the follow-up question UI. How would you like to proceed?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "{\"question\":\"This is a test of the follow-up question UI. How would you like to proceed?\",\"suggest\":[{\"answer\":\"\\nContinue testing.\\n\"},{\"answer\":\"\\nEnd the test.\\n\"},{\"answer\":\"\\nProvide feedback on the UI.\\n\"}]}",
+      "askType": "followup"
+    },
+    {
+      "type": "say",
+      "content": "[user_feedback] 1"
+    },
+    {
+      "type": "say",
+      "content": "[api_req_started] {\"request\":\"[ask_followup_question for 'This is a test of the follow-up question UI. How would you like to proceed?'] Result:\\n\\n<answer>\\n1\\n</answer>\\n\\nLoading...\"}"
+    },
+    {
+      "type": "ask",
+      "text": "Excellent. What aspect of the UI would",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Excellent. What aspect of the UI would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Excellent. What aspect of the UI would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Excellent. What aspect of the UI would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "{\"question\":\"Excellent. What aspect of the UI would you like to test next?\",\"suggest\":[{\"answer\":\"\\nTest the input fields.\\n\"},{\"answer\":\"\\nTest the button functionality.\\n\"},{\"answer\":\"\\nTest the response display area.\\n\"},{\"answer\":\"\\nLet's try another tool.\\n\"}]}",
+      "askType": "followup"
+    },
+    {
+      "type": "say",
+      "content": "[user_feedback] this is my respone"
+    },
+    {
+      "type": "say",
+      "content": "[api_req_started] {\"request\":\"[ask_followup_question for 'Excellent. What aspect of the UI would you like to test next?'] Result:\\n\\n<answer>\\nthis is my respone\\n</answer>\\n\\nLoading...\"}"
+    },
+    {
+      "type": "ask",
+      "text": "",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Understood. Your response has been received. What would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Understood. Your response has been received. What would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Understood. Your response has been received. What would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "Understood. Your response has been received. What would you like to test next?",
+      "askType": "followup"
+    },
+    {
+      "type": "ask",
+      "text": "{\"question\":\"Understood. Your response has been received. What would you like to test next?\",\"suggest\":[{\"answer\":\"\\nTest how the UI handles a long response.\\n\"},{\"answer\":\"\\nTest sending a code block.\\n\"},{\"answer\":\"\\nTest another tool's functionality.\\n\"},{\"answer\":\"\\nConclude the test.\\n\"}]}",
+      "askType": "followup"
     }
   ]
 }
