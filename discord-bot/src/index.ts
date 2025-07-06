@@ -9,15 +9,14 @@ dotenv.config();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEBSOCKET_PORT = parseInt(process.env.WEBSOCKET_PORT || '8080');
 const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
-const TARGET_USER = process.env.TARGET_USER;
 
 if (!DISCORD_TOKEN) {
     console.error('❌ DISCORD_TOKEN is required in environment variables');
     process.exit(1);
 }
 
-if (!TARGET_CHANNEL_ID && !TARGET_USER) {
-    console.error('❌ TARGET_CHANNEL_ID or TARGET_USER must be defined in environment variables');
+if (!TARGET_CHANNEL_ID) {
+    console.error('❌ TARGET_CHANNEL_ID must be defined in environment variables');
     process.exit(1);
 }
 
@@ -67,7 +66,7 @@ function formatEventForDiscord(eventName: string, data: any): { content: string 
                     .setDescription(message.text || 'Task completed successfully.');
                 return { content: null, embeds: [embed] };
             } else if (message.say === 'tool') {
-                return { content: `🛠️ **Using Tool:** \`${message.text || 'Unknown tool'}\`` };
+                return { content: `🛠️ Using a tool...` };
             } else if (message.say === 'text') {
                 if (message.text && message.text.trim().length > 0) {
                     return { content: message.text };
@@ -129,17 +128,13 @@ function formatEventForDiscord(eventName: string, data: any): { content: string 
             return { content: null }; // Remove noisy task completed message with stats
         
         case 'taskStarted':
-            return { content: `🚀 **Task Started:** ${data.taskId}` };
+            return { content: null };
         
         case 'taskCreated':
             return { content: null }; // Remove noisy task created message
         
         case 'taskAborted':
-            const embed = new EmbedBuilder()
-                .setColor(0xFF0000) // Red
-                .setTitle('❌ Task Aborted')
-                .setDescription(`Task \`${data.taskId}\` was aborted.`);
-            return { content: null, embeds: [embed] };
+            return { content: `❌ A previous task was aborted.` };
         
         default:
             return { content: `📡 **${eventName}:** ${JSON.stringify(data)}` };
@@ -381,7 +376,7 @@ client.once(Events.ClientReady, (readyClient) => {
     console.log(`🤖 Discord bot ready! Logged in as ${readyClient.user.tag}`);
     console.log(`🔌 WebSocket server listening on port ${WEBSOCKET_PORT}`);
     if (TARGET_CHANNEL_ID) console.log(`📢 Listening for messages in channel: ${TARGET_CHANNEL_ID}`);
-    if (TARGET_USER) console.log(`👤 Listening for DMs from user: ${TARGET_USER}`);
+    if (TARGET_CHANNEL_ID) console.log(`📢 Listening for messages in channel ${TARGET_CHANNEL_ID} and all DMs.`);
 });
 
 client.on(Events.MessageCreate, (message: Message) => {
@@ -389,10 +384,8 @@ client.on(Events.MessageCreate, (message: Message) => {
 
     const isDirectMessage = !message.guild;
     const isTargetChannel = message.channel.id === TARGET_CHANNEL_ID;
-    const userTag = `${message.author.username}#${message.author.discriminator}`;
-    const isTargetUser = message.author.username === TARGET_USER || userTag === TARGET_USER;
 
-    if (isTargetChannel || (isDirectMessage && isTargetUser)) {
+    if (isTargetChannel || isDirectMessage) {
         const source = isDirectMessage ? `DM from ${message.author.tag}` : `channel ${TARGET_CHANNEL_ID}`;
         console.log(`📨 Message received from ${source}: ${message.content}`);
         
@@ -413,10 +406,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
     const isDirectMessage = !interaction.guild;
     const isTargetChannel = interaction.channelId === TARGET_CHANNEL_ID;
-    const userTag = `${interaction.user.username}#${interaction.user.discriminator}`;
-    const isTargetUser = interaction.user.username === TARGET_USER || userTag === TARGET_USER;
 
-    if (isTargetChannel || (isDirectMessage && isTargetUser)) {
+    if (isTargetChannel || isDirectMessage) {
         const source = isDirectMessage ? `DM from ${interaction.user.tag}` : `channel ${TARGET_CHANNEL_ID}`;
         console.log(`⚡ Slash command received from ${source}: /${interaction.commandName}`);
 
@@ -496,6 +487,18 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                         flags: [MessageFlags.Ephemeral]
                     });
                 }
+            } else if (interaction.commandName === 'save-to-kb') {
+                const contentToSave = interaction.options.getString('content', true);
+                console.log(`💾 Received content to save to knowledge base:`, contentToSave);
+                broadcastToClients({
+                    type: 'command',
+                    command: 'save_to_kb',
+                    content: contentToSave
+                });
+                await interaction.reply({
+                    content: '✅ Your information has been sent for intelligent assimilation into the knowledge base.',
+                    flags: [MessageFlags.Ephemeral]
+                });
             } else {
                 // Unknown command
                 await interaction.reply({

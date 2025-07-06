@@ -55,6 +55,19 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
         description: 'Denies the last requested action from Roo.',
         type: ApplicationCommandType.ChatInput,
     },
+    {
+        name: 'save-to-kb',
+        description: 'Saves a piece of information to the knowledge base for intelligent assimilation.',
+        type: ApplicationCommandType.ChatInput,
+        options: [
+            {
+                name: 'content',
+                description: 'The information you want to save to the knowledge base.',
+                type: 3, // ApplicationCommandOptionType.String
+                required: true,
+            },
+        ],
+    },
 ];
 
 // Create REST client

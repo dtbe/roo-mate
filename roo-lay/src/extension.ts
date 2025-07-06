@@ -307,6 +307,23 @@ class WebSocketClient {
                 return;
             }
 
+            // Handle save_to_kb command
+            if (message.type === 'command' && message.command === 'save_to_kb') {
+                console.log('Processing save_to_kb command from Discord');
+                const knowledgeBasePrompt = `A user has submitted the following information to be saved to the knowledge base. Your task is to perform an intelligent assimilation by following the "Intelligent Assimilation Workflow" defined in the KNOWLEDGE_ASSIMILATION_PROTOCOL.md. Assess the content, decide whether to update, append, create, or discard it, and then execute the action. Provide a summary of your actions upon completion.\n\n---\n\n**Submitted Content:**\n${message.content}`;
+                
+                try {
+                    await this.rooCodeApi.startNewTask({
+                        text: knowledgeBasePrompt
+                    });
+                    vscode.window.showInformationMessage('Knowledge base assimilation task started.');
+                } catch (error) {
+                    console.error('Failed to start knowledge base task:', error);
+                    vscode.window.showErrorMessage('Failed to start knowledge base assimilation task.');
+                }
+                return;
+            }
+
             // Handle regular message
             if (message.type === 'message' && message.content) {
                 console.log('Processing message from Discord:', message.content);
