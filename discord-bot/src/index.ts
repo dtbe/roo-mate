@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits, Events, Message, Interaction, TextChannel, EmbedBuilder, MessageFlags } from 'discord.js';
 import { WebSocketServer, WebSocket } from 'ws';
+import { URLSearchParams } from 'url';
 import * as dotenv from 'dotenv';
 
 // Load environment variables
@@ -8,24 +9,26 @@ dotenv.config();
 // Configuration
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEBSOCKET_PORT = parseInt(process.env.WEBSOCKET_PORT || '8080');
-const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
+const PUBLIC_CHANNEL_ID = process.env.PUBLIC_CHANNEL_ID;
+const PRIVATE_CHANNEL_ID = process.env.PRIVATE_CHANNEL_ID;
 
 if (!DISCORD_TOKEN) {
     console.error('❌ DISCORD_TOKEN is required in environment variables');
     process.exit(1);
 }
 
-if (!TARGET_CHANNEL_ID) {
-    console.error('❌ TARGET_CHANNEL_ID must be defined in environment variables');
+if (!PUBLIC_CHANNEL_ID || !PRIVATE_CHANNEL_ID) {
+    console.error('❌ PUBLIC_CHANNEL_ID and PRIVATE_CHANNEL_ID must be defined in environment variables');
     process.exit(1);
 }
+
+const ALLOWED_CHANNELS = [PUBLIC_CHANNEL_ID, PRIVATE_CHANNEL_ID];
 
 // Discord client setup
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent
     ]
 });
@@ -34,13 +37,13 @@ const client = new Client({
 const wss = new WebSocketServer({ port: WEBSOCKET_PORT });
 
 // Store connected WebSocket clients
-const connectedClients: Set<WebSocket> = new Set();
+const connectedClients = new Map<string, WebSocket>();
 const messageQueue: any[] = [];
 
-// Store the context of the last message to know where to reply
-let lastMessageContext: Message | Interaction | null = null;
-// Store an action that requires user approval
-let pendingAction: { type: 'command'; content: string } | null = null;
+// Store context and pending actions per channel
+const lastMessageContexts = new Map<string, Message | Interaction>();
+const pendingActions = new Map<string, { type: 'command'; content: string }>();
+
 
 // Debounce for batching related messages
 const messageProcessingTimers = new Map<string, NodeJS.Timeout>();
@@ -80,7 +83,10 @@ function formatEventForDiscord(eventName: string, data: any): { content: string 
                 // Check if this is a command execution request that needs approval
                 const commandRegex = /^(npx|npm|git|yarn|pnpm|node|python|go|rustc|tsc|docker|kubectl|move|del|mkdir)\s/;
                 if (message.text && commandRegex.test(message.text)) {
-                    pendingAction = { type: 'command', content: message.text };
+                    // Note: We don't have channel context here, so we'll store it globally for now.
+                    // A better approach would be to have the extension send the channelId back with the event.
+                    // For now, we assume one pending action across all channels.
+                    pendingActions.set('global', { type: 'command', content: message.text });
                     return { content: `🤖 **Action Required**\nRoo wants to run the following command. Please use \`/approve\` or \`/deny\`.\n\`\`\`sh\n${message.text}\n\`\`\`` };
                 }
                 
@@ -219,47 +225,26 @@ async function sendMessageToChannel(channelId: string, messageOptions: { content
     }
 }
 
-// Function to send a DM to a specific user
-async function sendDmToUser(userId: string, messageOptions: { content: string | null; embeds?: EmbedBuilder[] }): Promise<void> {
-    try {
-        const user = await client.users.fetch(userId);
-        if (user) {
-            const { content, embeds } = messageOptions;
-
-            // Don't send if both content and embeds are empty
-            if (!content && (!embeds || embeds.length === 0)) {
-                return;
-            }
-
-            const messagePayload: any = {};
-            if (content) {
-                const messageParts = splitMessage(content);
-                // Send embeds only with the first part of a multi-part message
-                for (let i = 0; i < messageParts.length; i++) {
-                    const payload: any = { content: messageParts[i] };
-                    if (i === 0 && embeds) {
-                        payload.embeds = embeds;
-                    }
-                    await user.send(payload);
-                    console.log(`📤 Sent DM to user ${user.username}`);
-                }
-            } else if (embeds) {
-                messagePayload.embeds = embeds;
-                await user.send(messagePayload);
-                console.log(`📤 Sent embed to user ${user.username}`);
-            }
-        } else {
-            console.error(`❌ User ${userId} not found.`);
-        }
-    } catch (error) {
-        console.error(`❌ Error sending DM to user ${userId}:`, error);
-    }
-}
-
 // WebSocket server event handlers
-wss.on('connection', (ws: WebSocket) => {
-    console.log('🔌 New WebSocket connection established');
-    connectedClients.add(ws);
+wss.on('connection', (ws: WebSocket, req) => {
+    const params = new URLSearchParams(req.url?.split('?')[1] || '');
+    const clientId = params.get('clientId');
+
+    if (!clientId) {
+        console.log('🔌 Connection rejected: No client ID provided.');
+        ws.close();
+        return;
+    }
+
+    // If this client ID is already connected, close the old connection
+    if (connectedClients.has(clientId)) {
+        console.log(`🔌 Client ${clientId} reconnected, closing old connection.`);
+        connectedClients.get(clientId)?.terminate();
+    }
+
+    console.log(`🔌 New WebSocket connection established for client: ${clientId}`);
+    connectedClients.set(clientId, ws);
+    (ws as any).clientId = clientId;
 
     // Send any queued messages
     if (messageQueue.length > 0) {
@@ -277,53 +262,23 @@ wss.on('connection', (ws: WebSocket) => {
             console.log('📨 Received WebSocket message:', message);
             
             // --- Debounce Logic for Streaming Messages ---
-            const taskId = message.data?.taskId;
-            const isStreamingMessage = message.type === 'event' && message.eventName === 'message' &&
-                                       (message.data?.message?.partial === true ||
-                                        message.data?.message?.say === 'reasoning' ||
-                                        message.data?.message?.say === 'text');
+            const { channelId, eventName, data: eventData } = message;
+            const taskId = eventData?.taskId;
 
-            if (taskId && isStreamingMessage) {
-                if (messageProcessingTimers.has(taskId)) {
-                    clearTimeout(messageProcessingTimers.get(taskId)!);
-                }
-
-                const timer = setTimeout(async () => {
-                    messageProcessingTimers.delete(taskId);
-                    // Only process the last received message for this taskId
-                    if (lastMessageContext) {
-                        const formattedMessage = formatEventForDiscord(message.eventName, message.data);
-                        if (formattedMessage) {
-                            if (lastMessageContext.guild && lastMessageContext.channelId) {
-                                await sendMessageToChannel(lastMessageContext.channelId, formattedMessage);
-                            } else {
-                                const userId = 'user' in lastMessageContext ? lastMessageContext.user.id : lastMessageContext.author.id;
-                                await sendDmToUser(userId, formattedMessage);
-                            }
-                        }
-                    }
-                }, DEBOUNCE_DELAY_MS);
-                
-                messageProcessingTimers.set(taskId, timer);
-            } else if (message.type === 'event' && lastMessageContext) {
-                // Clean up timers for completed/aborted tasks
-                if ((message.eventName === 'taskCompleted' || message.eventName === 'taskAborted') && taskId) {
+            // Ensure we only process events destined for a specific channel
+            if (message.type === 'event' && channelId) {
+                 // Clean up timers for completed/aborted tasks
+                if ((eventName === 'taskCompleted' || eventName === 'taskAborted') && taskId) {
                     if (messageProcessingTimers.has(taskId)) {
                         clearTimeout(messageProcessingTimers.get(taskId)!);
                         messageProcessingTimers.delete(taskId);
-                        console.log(`🧹 Cleaned up timer for ${message.eventName}: ${taskId}`);
+                        console.log(`🧹 Cleaned up timer for ${eventName}: ${taskId}`);
                     }
                 }
 
-                // Handle all other non-streaming events immediately
-                const formattedMessage = formatEventForDiscord(message.eventName, message.data);
+                const formattedMessage = formatEventForDiscord(eventName, eventData);
                 if (formattedMessage) {
-                    if (lastMessageContext.guild && lastMessageContext.channelId) {
-                        await sendMessageToChannel(lastMessageContext.channelId, formattedMessage);
-                    } else {
-                        const userId = 'user' in lastMessageContext ? lastMessageContext.user.id : lastMessageContext.author.id;
-                        await sendDmToUser(userId, formattedMessage);
-                    }
+                    await sendMessageToChannel(channelId, formattedMessage);
                 }
             }
         } catch (error) {
@@ -332,13 +287,19 @@ wss.on('connection', (ws: WebSocket) => {
     });
     
     ws.on('close', () => {
-        console.log('🔌 WebSocket connection closed');
-        connectedClients.delete(ws);
+        const closedClientId = (ws as any).clientId;
+        console.log(`🔌 WebSocket connection closed for client: ${closedClientId}`);
+        if (closedClientId) {
+            connectedClients.delete(closedClientId);
+        }
     });
     
     ws.on('error', (error) => {
-        console.error('❌ WebSocket error:', error);
-        connectedClients.delete(ws);
+        const errorClientId = (ws as any).clientId;
+        console.error(`❌ WebSocket error for client ${errorClientId}:`, error);
+        if (errorClientId) {
+            connectedClients.delete(errorClientId);
+        }
     });
     
     // Send welcome message to new client
@@ -359,12 +320,13 @@ function broadcastToClients(data: any) {
         return;
     }
     
-    connectedClients.forEach((client) => {
+    connectedClients.forEach((client, clientId) => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(message);
         } else {
             // Remove closed connections
-            connectedClients.delete(client);
+            console.log(`🔌 Removing stale connection for client: ${clientId}`);
+            connectedClients.delete(clientId);
         }
     });
     
@@ -375,51 +337,45 @@ function broadcastToClients(data: any) {
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`🤖 Discord bot ready! Logged in as ${readyClient.user.tag}`);
     console.log(`🔌 WebSocket server listening on port ${WEBSOCKET_PORT}`);
-    if (TARGET_CHANNEL_ID) console.log(`📢 Listening for messages in channel: ${TARGET_CHANNEL_ID}`);
-    if (TARGET_CHANNEL_ID) console.log(`📢 Listening for messages in channel ${TARGET_CHANNEL_ID} and all DMs.`);
+    console.log(`📢 Listening for messages in channels: ${ALLOWED_CHANNELS.join(', ')}`);
 });
 
 client.on(Events.MessageCreate, (message: Message) => {
     if (message.author.bot) return;
 
-    const isDirectMessage = !message.guild;
-    const isTargetChannel = message.channel.id === TARGET_CHANNEL_ID;
-
-    if (isTargetChannel || isDirectMessage) {
-        const source = isDirectMessage ? `DM from ${message.author.tag}` : `channel ${TARGET_CHANNEL_ID}`;
-        console.log(`📨 Message received from ${source}: ${message.content}`);
+    if (ALLOWED_CHANNELS.includes(message.channel.id)) {
+        console.log(`📨 Message received from channel ${message.channel.id}: ${message.content}`);
         
         // Store context for replies
-        lastMessageContext = message;
+        lastMessageContexts.set(message.channel.id, message);
         
         // Broadcast to clients
         console.log('💬 Broadcasting message payload to WebSocket clients');
         broadcastToClients({
             type: 'message',
-            content: message.content
+            content: message.content,
+            channelId: message.channel.id
         });
     }
 });
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.isChatInputCommand() || !interaction.channelId) return;
 
-    const isDirectMessage = !interaction.guild;
-    const isTargetChannel = interaction.channelId === TARGET_CHANNEL_ID;
-
-    if (isTargetChannel || isDirectMessage) {
-        const source = isDirectMessage ? `DM from ${interaction.user.tag}` : `channel ${TARGET_CHANNEL_ID}`;
-        console.log(`⚡ Slash command received from ${source}: /${interaction.commandName}`);
+    if (ALLOWED_CHANNELS.includes(interaction.channelId)) {
+        console.log(`⚡ Slash command received from channel ${interaction.channelId}: /${interaction.commandName}`);
 
         // Store context for replies
-        lastMessageContext = interaction;
+        lastMessageContexts.set(interaction.channelId, interaction);
+        const pendingAction = pendingActions.get(interaction.channelId) || pendingActions.get('global');
 
         try {
             if (interaction.commandName === 'reset') {
                 console.log(`🔄 reset command received, broadcasting reset payload`);
                 broadcastToClients({
                     type: 'command',
-                    command: 'reset'
+                    command: 'reset',
+                    channelId: interaction.channelId
                 });
                 await interaction.reply({
                     content: '✅ Task reset successfully. Ready for a new conversation!',
@@ -433,7 +389,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                 // 1. Reset the state
                 broadcastToClients({
                     type: 'command',
-                    command: 'reset'
+                    command: 'reset',
+                    channelId: interaction.channelId
                 });
 
                 // 2. Send the new message after a short delay
@@ -441,7 +398,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                 setTimeout(() => {
                     broadcastToClients({
                         type: 'message',
-                        content: messageContent
+                        content: messageContent,
+                        channelId: interaction.channelId
                     });
                 }, 150);
 
@@ -451,13 +409,15 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                 });
             } else if (interaction.commandName === 'approve') {
                 if (pendingAction) {
-                    console.log(`👍 Approving action:`, pendingAction);
+                    console.log(`👍 Approving action in channel ${interaction.channelId}:`, pendingAction);
                     // Send a 'yes' response back to the core to confirm the action
                     broadcastToClients({
                         type: 'message',
-                        content: 'yes'
+                        content: 'yes',
+                        channelId: interaction.channelId
                     });
-                    pendingAction = null;
+                    pendingActions.delete(interaction.channelId);
+                    pendingActions.delete('global');
                     await interaction.reply({
                         content: '✅ Action approved and sent to Roo.',
                         flags: [MessageFlags.Ephemeral]
@@ -470,13 +430,15 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                 }
             } else if (interaction.commandName === 'deny') {
                 if (pendingAction) {
-                    console.log(`👎 Denying action:`, pendingAction);
+                    console.log(`👎 Denying action in channel ${interaction.channelId}:`, pendingAction);
                      // Send a 'no' response back to the core to deny the action
                     broadcastToClients({
                         type: 'message',
-                        content: 'no'
+                        content: 'no',
+                        channelId: interaction.channelId
                     });
-                    pendingAction = null;
+                    pendingActions.delete(interaction.channelId);
+                    pendingActions.delete('global');
                     await interaction.reply({
                         content: '❌ Action denied.',
                         flags: [MessageFlags.Ephemeral]
@@ -489,11 +451,12 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
                 }
             } else if (interaction.commandName === 'save-to-kb') {
                 const contentToSave = interaction.options.getString('content', true);
-                console.log(`💾 Received content to save to knowledge base:`, contentToSave);
+                console.log(`💾 Received content in channel ${interaction.channelId} to save to knowledge base:`, contentToSave);
                 broadcastToClients({
                     type: 'command',
                     command: 'save_to_kb',
-                    content: contentToSave
+                    content: contentToSave,
+                    channelId: interaction.channelId
                 });
                 await interaction.reply({
                     content: '✅ Your information has been sent for intelligent assimilation into the knowledge base.',

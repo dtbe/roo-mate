@@ -86,14 +86,15 @@ const RECONNECT_DELAY_MS = 3000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 
 // Global state
-let activeTaskId: string | null = null;
+const activeTaskIds = new Map<string, string>(); // Map channelId to taskId
+const channelIdByTaskId = new Map<string, string>(); // Map taskId to channelId
 let wsClientInstance: WebSocketClient | null = null;
 let reconnectTimeout: NodeJS.Timeout | null = null;
 let reconnectDelay = RECONNECT_DELAY_MS;
 let isExtensionActive = true;
-let isResettingTask = false; // New flag to indicate if a reset command was issued
 const messageCache = new Map<string, number>();
 const CACHE_EXPIRATION_MS = 10000; // 10-second window to catch duplicates
+let clientId: string | undefined;
 
 // Helper function to get Roo Code API
 function getRooCodeApi(): RooCodeAPI | undefined {
@@ -126,95 +127,68 @@ class WebSocketClient {
             return;
         }
 
-        // Listen for messages from Roo Code API
+        const genericEventHandler = (eventName: RooCodeEventName) => (taskId: string, data: any = {}) => {
+            const channelId = channelIdByTaskId.get(taskId);
+            if (channelId) {
+                console.log(`[roo-lay] Forwarding event '${eventName}' for task ${taskId} to channel ${channelId}`);
+                this.sendToDiscord({
+                    type: 'event',
+                    eventName,
+                    channelId,
+                    data: { taskId, ...data }
+                });
+
+                if (eventName === RooCodeEventName.TaskCompleted || eventName === RooCodeEventName.TaskAborted) {
+                    console.log(`[roo-lay] Task ${taskId} ended. Cleaning up maps for channel ${channelId}.`);
+                    activeTaskIds.delete(channelId);
+                    channelIdByTaskId.delete(taskId);
+                }
+            } else {
+                console.warn(`[roo-lay] Received event '${eventName}' for task ${taskId}, but no channel is associated.`);
+            }
+        };
+
         this.rooCodeApi.on(RooCodeEventName.Message, (event) => {
-            // --- Deduplication Logic ---
-            const textContent = event.message?.text || event.message?.reasoning || '';
-            const contentHash = createHash('sha256').update(textContent).digest('hex');
-            const eventId = event.message?.ts ? `${event.taskId}-${event.message.ts}-${contentHash}` : null;
-
-            if (eventId) {
-                const now = Date.now();
-                // Clean up old entries from the cache
-                for (const [id, timestamp] of messageCache.entries()) {
-                    if (now - timestamp > CACHE_EXPIRATION_MS) {
-                        messageCache.delete(id);
+            const channelId = channelIdByTaskId.get(event.taskId);
+            if (channelId) {
+                this.sendToDiscord({
+                    type: 'event',
+                    eventName: 'message',
+                    channelId: channelId,
+                    data: {
+                        taskId: event.taskId,
+                        action: event.action,
+                        message: event.message
                     }
-                }
-
-                // If the event is already in the cache, ignore it
-                if (messageCache.has(eventId)) {
-                    console.log(`[roo-lay] Duplicate message detected, not forwarding: ${eventId}`);
-                    return; // Stop processing the duplicate event
-                }
-                // Otherwise, add it to the cache
-                messageCache.set(eventId, now);
+                });
             }
-
-            this.sendToDiscord({
-                type: 'event',
-                eventName: 'message',
-                data: {
-                    taskId: event.taskId,
-                    action: event.action,
-                    message: event.message
-                }
-            });
         });
-
-        // Listen for task completion
-        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId, usage) => {
-            // Don't clear activeTaskId on task completion - only clear it on explicit reset
-            this.sendToDiscord({
-                type: 'event',
-                eventName: 'taskCompleted',
-                data: {
-                    taskId,
-                    usage
-                }
-            });
-        });
-
-        // Listen for other task events
+        
         this.rooCodeApi.on(RooCodeEventName.TaskCreated, (taskId) => {
-            // Update activeTaskId when a new task is created
-            console.log(`Task created: ${taskId}, setting as activeTaskId`);
-            activeTaskId = taskId;
-            this.sendToDiscord({
-                type: 'event',
-                eventName: 'taskCreated',
-                data: { taskId }
-            });
+            // This event is tricky because we don't know the channelId yet.
+            // We will associate it when startNewTask resolves.
+            console.log(`[roo-lay] Task ${taskId} created by API.`);
         });
 
-        this.rooCodeApi.on(RooCodeEventName.TaskStarted, (taskId) => {
-            this.sendToDiscord({
-                type: 'event',
-                eventName: 'taskStarted',
-                data: { taskId }
-            });
-        });
-
-        this.rooCodeApi.on(RooCodeEventName.TaskAborted, (taskId) => {
-            // Clear activeTaskId if it's the current task being aborted
-            if (taskId === activeTaskId) {
-                console.log(`Task aborted: ${taskId}, clearing activeTaskId (reset: ${isResettingTask})`);
-                activeTaskId = null;
-            }
-            this.sendToDiscord({
-                type: 'event',
-                eventName: 'taskAborted',
-                data: { taskId }
-            });
-        });
+        this.rooCodeApi.on(RooCodeEventName.TaskStarted, genericEventHandler(RooCodeEventName.TaskStarted));
+        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId, usage) => genericEventHandler(RooCodeEventName.TaskCompleted)(taskId, { usage }));
+        this.rooCodeApi.on(RooCodeEventName.TaskAborted, genericEventHandler(RooCodeEventName.TaskAborted));
     }
 
     public connect(): void {
         if (!isExtensionActive || this.ws) return; // Prevent multiple connections
 
         try {
-            console.log('Attempting to connect to WebSocket server...');
-            this.ws = new WebSocket.WebSocket(WEBSOCKET_URL);
+            if (!clientId) {
+                clientId = vscode.workspace.getConfiguration('roo-lay').get('clientId');
+                if (!clientId) {
+                    clientId = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest('hex');
+                    vscode.workspace.getConfiguration('roo-lay').update('clientId', clientId, vscode.ConfigurationTarget.Global);
+                }
+            }
+            const urlWithClientId = `${WEBSOCKET_URL}?clientId=${clientId}`;
+            console.log(`Attempting to connect to WebSocket server at ${urlWithClientId}...`);
+            this.ws = new WebSocket.WebSocket(urlWithClientId);
 
             if (this.ws) {
                 this.ws.on('open', () => {
@@ -290,121 +264,61 @@ class WebSocketClient {
         try {
             console.log('Received Discord message:', message);
 
-            // Handle command messages (reset)
-            if (message.type === 'command' && message.command === 'reset') {
-                console.log('Processing reset command from Discord');
-                isResettingTask = true; // Set the flag when a reset command is received
-                if (activeTaskId) {
-                    await this.rooCodeApi.cancelCurrentTask();
-                    vscode.window.showInformationMessage('Active task cancelled by Discord reset command');
-                } else {
-                    vscode.window.showInformationMessage('No active task to reset');
-                }
-                // Clear activeTaskId immediately after cancelling for reset commands
-                console.log('Clearing activeTaskId due to reset command');
-                activeTaskId = null;
-                isResettingTask = false; // Reset the flag after processing the command
+            const { type, command, content, channelId } = message;
+
+            if (!channelId) {
+                console.error('[roo-lay] Received message without channelId, cannot process.');
                 return;
             }
 
-            // Handle save_to_kb command
-            if (message.type === 'command' && message.command === 'save_to_kb') {
-                console.log('Processing save_to_kb command from Discord');
-                const knowledgeBasePrompt = `A user has submitted the following information to be saved to the knowledge base. Your task is to perform an intelligent assimilation by following the "Intelligent Assimilation Workflow" defined in the KNOWLEDGE_ASSIMILATION_PROTOCOL.md. Assess the content, decide whether to update, append, create, or discard it, and then execute the action. Provide a summary of your actions upon completion.\n\n---\n\n**Submitted Content:**\n${message.content}`;
-                
-                try {
-                    await this.rooCodeApi.startNewTask({
-                        text: knowledgeBasePrompt
-                    });
-                    vscode.window.showInformationMessage('Knowledge base assimilation task started.');
-                } catch (error) {
-                    console.error('Failed to start knowledge base task:', error);
-                    vscode.window.showErrorMessage('Failed to start knowledge base assimilation task.');
-                }
-                return;
-            }
+            const currentTaskId = activeTaskIds.get(channelId);
 
-            // Handle regular message
-            if (message.type === 'message' && message.content) {
-                console.log('Processing message from Discord:', message.content);
-                console.log(`Current activeTaskId: ${activeTaskId}`);
-                
-                if (activeTaskId) {
-                    // Send message to existing task
-                    console.log(`Sending message to existing task: ${activeTaskId}`);
+            // Handle command messages
+            if (type === 'command') {
+                if (command === 'reset') {
+                    console.log(`[roo-lay] Processing reset command for channel ${channelId}`);
+                    if (currentTaskId) {
+                        await this.rooCodeApi.cancelCurrentTask(); // Assumes this cancels the task associated with the extension's internal state
+                        vscode.window.showInformationMessage(`Active task in channel ${channelId} cancelled by Discord reset command`);
+                    } else {
+                        vscode.window.showInformationMessage(`No active task in channel ${channelId} to reset`);
+                    }
+                } else if (command === 'save_to_kb') {
+                    console.log(`[roo-lay] Processing save_to_kb command for channel ${channelId}`);
+                    const knowledgeBasePrompt = `A user has submitted the following information to be saved to the knowledge base. Your task is to perform an intelligent assimilation by following the "Intelligent Assimilation Workflow" defined in the KNOWLEDGE_ASSIMILATION_PROTOCOL.md. Assess the content, decide whether to update, append, create, or discard it, and then execute the action. Provide a summary of your actions upon completion.\n\n---\n\n**Submitted Content:**\n${content}`;
                     try {
-                        await this.rooCodeApi.sendMessage(message.content);
-                        vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
+                        // This creates a new task, independent of the channel's main conversation
+                        const kbTaskId = await this.rooCodeApi.startNewTask({ text: knowledgeBasePrompt });
+                        channelIdByTaskId.set(kbTaskId, channelId); // Associate with channel for response
+                        vscode.window.showInformationMessage(`Knowledge base assimilation task ${kbTaskId} started for channel ${channelId}.`);
                     } catch (error) {
-                        console.error('Failed to send message to existing task:', error);
-                        vscode.window.showErrorMessage('Failed to send message to active task');
-                        // Don't clear activeTaskId here - let the TaskAborted event handle it
+                        console.error('Failed to start knowledge base task:', error);
+                    }
+                }
+                return;
+            }
+
+            // Handle regular messages
+            if (type === 'message' && content) {
+                if (currentTaskId) {
+                    console.log(`[roo-lay] Sending message to existing task ${currentTaskId} in channel ${channelId}`);
+                    try {
+                        await this.rooCodeApi.sendMessage(content);
+                        vscode.window.showInformationMessage(`Message sent to active task in channel ${channelId}`);
+                    } catch (error) {
+                        console.error(`Failed to send message to existing task ${currentTaskId}:`, error);
                     }
                 } else {
-                    // Start new task
-                    console.log('No active task, starting new task with content:', message.content);
+                    console.log(`[roo-lay] No active task for channel ${channelId}, starting new task.`);
                     try {
-                        await this.rooCodeApi.startNewTask({
-                            text: message.content
-                        });
-                        vscode.window.showInformationMessage('New task started from Discord message');
+                        const newTaskId = await this.rooCodeApi.startNewTask({ text: content });
+                        activeTaskIds.set(channelId, newTaskId);
+                        channelIdByTaskId.set(newTaskId, channelId);
+                        vscode.window.showInformationMessage(`New task ${newTaskId} started from channel ${channelId}`);
                     } catch (error) {
                         console.error('Failed to start new task:', error);
-                        vscode.window.showErrorMessage('Failed to start new task from Discord message');
                     }
                 }
-                return;
-            }
-
-            // Handle legacy message format (for backwards compatibility)
-            if (message.text) {
-                console.log('Processing legacy message format:', message.text);
-                
-                if (activeTaskId) {
-                    // Send message to existing task
-                    try {
-                        await this.rooCodeApi.sendMessage(message.text, message.images);
-                        vscode.window.showInformationMessage(`Message sent to active task: ${activeTaskId}`);
-                    } catch (error) {
-                        console.error('Failed to send legacy message to existing task:', error);
-                        vscode.window.showErrorMessage('Failed to send message to active task');
-                    }
-                } else {
-                    // Start new task
-                    try {
-                        const config = this.rooCodeApi.getConfiguration();
-                        const updatedConfig = {
-                            ...config,
-                            mode: message.mode || 'ask',
-                            discordContext: {
-                                channelId: message.channelId,
-                                userId: message.userId,
-                                username: message.username
-                            }
-                        };
-
-                        const newTaskId = await this.rooCodeApi.startNewTask({
-                            configuration: updatedConfig,
-                            text: message.text,
-                            images: message.images
-                        });
-
-                        vscode.window.showInformationMessage(`New task started from Discord: ${newTaskId}`);
-                    } catch (error) {
-                        console.error('Failed to start new legacy task:', error);
-                        vscode.window.showErrorMessage('Failed to start new task from Discord message');
-                    }
-                }
-                return;
-            }
-
-            // Handle ask response (existing functionality)
-            if (message.type === 'askResponse' && activeTaskId) {
-                await this.rooCodeApi.handleWebviewAskResponse(
-                    message.askResponse,
-                    message.text,
-                    message.images
-                );
                 return;
             }
 
