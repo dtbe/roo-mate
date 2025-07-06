@@ -138,8 +138,13 @@ class WebSocketClient {
                     data: { taskId, ...data }
                 });
 
-                if (eventName === RooCodeEventName.TaskCompleted || eventName === RooCodeEventName.TaskAborted) {
-                    console.log(`[roo-lay] Task ${taskId} ended. Cleaning up maps for channel ${channelId}.`);
+                if (eventName === RooCodeEventName.TaskCompleted) {
+                    // Don't delete from activeTaskIds, so the conversation can continue.
+                    // The task is only truly "done" from roo-lay's perspective on /reset.
+                    console.log(`[roo-lay] Task ${taskId} completed on backend. Cleaning up channelIdByTaskId map only.`);
+                    channelIdByTaskId.delete(taskId);
+                } else if (eventName === RooCodeEventName.TaskAborted) {
+                    console.log(`[roo-lay] Task ${taskId} aborted. Cleaning up all maps for channel ${channelId}.`);
                     activeTaskIds.delete(channelId);
                     channelIdByTaskId.delete(taskId);
                 }
@@ -307,6 +312,17 @@ class WebSocketClient {
                         vscode.window.showInformationMessage(`Message sent to active task in channel ${channelId}`);
                     } catch (error) {
                         console.error(`Failed to send message to existing task ${currentTaskId}:`, error);
+                        // This likely means the task was completed on the backend.
+                        // We'll start a new task with the user's message to continue the conversation.
+                        console.log(`[roo-lay] Starting new task for channel ${channelId} as previous task may have ended.`);
+                        try {
+                            const newTaskId = await this.rooCodeApi.startNewTask({ text: content });
+                            activeTaskIds.set(channelId, newTaskId);
+                            channelIdByTaskId.set(newTaskId, channelId);
+                            vscode.window.showInformationMessage(`New task ${newTaskId} started from channel ${channelId}`);
+                        } catch (startError) {
+                            console.error('Failed to start new task after sendMessage failed:', startError);
+                        }
                     }
                 } else {
                     console.log(`[roo-lay] No active task for channel ${channelId}, starting new task.`);
