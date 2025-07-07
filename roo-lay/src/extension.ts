@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import * as WebSocket from 'ws';
 import { createHash } from 'crypto';
 
-// Re-defining RooCodeEvents and RooCodeEventName based on roo-code.ts for self-containment
+// --- Type Definitions ---
 export type RooCodeEvents = {
     message: [
         {
@@ -21,347 +21,182 @@ export type RooCodeEvents = {
                 conversationHistoryIndex?: number;
                 checkpoint?: { [x: string]: unknown; };
                 progressStatus?: { icon?: string; text?: string; };
-                choices?: { label: string; value: string; }[]; // Add choices for ask messages
+                choices?: { label: string; value: string; }[];
             };
         },
     ];
     taskCreated: [string];
     taskStarted: [string];
-    taskModeSwitched: [string, string];
-    taskPaused: [string];
-    taskUnpaused: [string];
-    taskAskResponded: [string];
     taskAborted: [string];
-    taskSpawned: [string, string];
-    taskCompleted: [
-        string,
-        {
-            totalTokensIn: number;
-            totalTokensOut: number;
-            totalCacheWrites?: number;
-            totalCacheReads?: number;
-            totalCost: number;
-            contextTokens: number;
-        },
-    ];
-    taskTokenUsageUpdated: [
-        string,
-        {
-            totalTokensIn: number;
-            totalTokensOut: number;
-            totalCacheWrites?: number;
-            totalCacheReads?: number;
-            totalCost: number;
-            contextTokens: number;
-        },
-    ];
+    taskCompleted: [string, any];
 };
 
 export enum RooCodeEventName {
     Message = "message",
     TaskCreated = "taskCreated",
     TaskStarted = "taskStarted",
-    TaskModeSwitched = "taskModeSwitched",
-    TaskPaused = "taskPaused",
-    TaskUnpaused = "taskUnpaused",
-    TaskAskResponded = "taskAskResponded",
     TaskAborted = "taskAborted",
-    TaskSpawned = "taskSpawned",
     TaskCompleted = "taskCompleted",
-    TaskTokenUsageUpdated = "taskTokenUsageUpdated",
 }
 
-// Assuming Roo Code API is exposed via an extension export
 interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
-    startNewTask(options: { configuration?: any; text?: string; images?: string[] }): Promise<string>;
-    sendMessage(text?: string, images?: string[]): Promise<void>;
+    startNewTask(options: { text?: string }): Promise<string>;
+    sendMessage(text?: string): Promise<void>;
     cancelCurrentTask(): Promise<void>;
-    getConfiguration(): any;
-    handleWebviewAskResponse(askResponse: any, text?: string, images?: string[]): Promise<void>;
 }
 
-// WebSocket configuration
+// --- WebSocket and State Configuration ---
 const WEBSOCKET_URL = 'ws://localhost:8080';
 const RECONNECT_DELAY_MS = 3000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 
-// Global state
-const activeTaskIds = new Map<string, string>(); // Map channelId to taskId
-const channelIdByTaskId = new Map<string, string>(); // Map taskId to channelId
-let wsClientInstance: WebSocketClient | null = null;
-let reconnectTimeout: NodeJS.Timeout | null = null;
-let reconnectDelay = RECONNECT_DELAY_MS;
-let isExtensionActive = true;
-const messageCache = new Map<string, number>();
-const CACHE_EXPIRATION_MS = 10000; // 10-second window to catch duplicates
-let clientId: string | undefined;
+class GlobalState {
+    activeTaskIds = new Map<string, string>();
+    channelIdByTaskId = new Map<string, string>();
+    wsClientInstance: WebSocketClient | null = null;
+    reconnectTimeout: NodeJS.Timeout | null = null;
+    reconnectDelay = RECONNECT_DELAY_MS;
+    isExtensionActive = true;
+    clientId: string | undefined;
+}
+const globalState = new GlobalState();
 
-// Helper function to get Roo Code API
+// --- Helper Functions ---
 function getRooCodeApi(): RooCodeAPI | undefined {
     const extension = vscode.extensions.getExtension<RooCodeAPI>("rooveterinaryinc.roo-cline");
     if (!extension) {
-        vscode.window.showErrorMessage("Roo Code extension not found. Please install 'rooveterinaryinc.roo-cline'.");
+        vscode.window.showErrorMessage("Roo Code extension not found.");
         return undefined;
     }
-    if (!extension.isActive) {
-        extension.activate();
-    }
+    if (!extension.isActive) extension.activate();
     return extension.exports;
 }
 
-// WebSocket client implementation
+// --- WebSocket Client ---
 class WebSocketClient {
     private ws: WebSocket.WebSocket | null = null;
-    private context: vscode.ExtensionContext;
     private rooCodeApi: RooCodeAPI | undefined;
+    private isLeader = false;
 
-    constructor(context: vscode.ExtensionContext) {
-        this.context = context;
+    constructor() {
         this.rooCodeApi = getRooCodeApi();
         this.setupRooCodeEventListeners();
     }
 
     private setupRooCodeEventListeners(): void {
-        if (!this.rooCodeApi) {
-            console.warn('Roo Code API not available during event listener setup');
-            return;
-        }
+        if (!this.rooCodeApi) return;
 
-        const genericEventHandler = (eventName: RooCodeEventName) => (taskId: string, data: any = {}) => {
-            const channelId = channelIdByTaskId.get(taskId);
+        const eventHandler = (eventName: string) => (taskId: string, data: any = {}) => {
+            if (!this.isLeader) return;
+            const channelId = globalState.channelIdByTaskId.get(taskId);
             if (channelId) {
-                console.log(`[roo-lay] Forwarding event '${eventName}' for task ${taskId} to channel ${channelId}`);
-                this.sendToDiscord({
-                    type: 'event',
-                    eventName,
-                    channelId,
-                    data: { taskId, ...data }
-                });
-
-                if (eventName === RooCodeEventName.TaskCompleted) {
-                    // Don't delete from activeTaskIds, so the conversation can continue.
-                    // The task is only truly "done" from roo-lay's perspective on /reset.
-                    console.log(`[roo-lay] Task ${taskId} completed on backend. Cleaning up channelIdByTaskId map only.`);
-                    channelIdByTaskId.delete(taskId);
-                } else if (eventName === RooCodeEventName.TaskAborted) {
-                    console.log(`[roo-lay] Task ${taskId} aborted. Cleaning up all maps for channel ${channelId}.`);
-                    activeTaskIds.delete(channelId);
-                    channelIdByTaskId.delete(taskId);
+                this.sendToDiscord({ type: 'event', eventName, channelId, data: { taskId, ...data } });
+                if (eventName === 'taskCompleted' || eventName === 'taskAborted') {
+                    globalState.activeTaskIds.delete(channelId);
+                    globalState.channelIdByTaskId.delete(taskId);
                 }
-            } else {
-                console.warn(`[roo-lay] Received event '${eventName}' for task ${taskId}, but no channel is associated.`);
             }
         };
 
         this.rooCodeApi.on(RooCodeEventName.Message, (event) => {
-            const channelId = channelIdByTaskId.get(event.taskId);
+            if (!this.isLeader) return;
+            const channelId = globalState.channelIdByTaskId.get(event.taskId);
             if (channelId) {
-                this.sendToDiscord({
-                    type: 'event',
-                    eventName: 'message',
-                    channelId: channelId,
-                    data: {
-                        taskId: event.taskId,
-                        action: event.action,
-                        message: event.message
-                    }
-                });
+                this.sendToDiscord({ type: 'event', eventName: 'message', channelId, data: event });
             }
         });
-        
-        this.rooCodeApi.on(RooCodeEventName.TaskCreated, (taskId) => {
-            // This event is tricky because we don't know the channelId yet.
-            // We will associate it when startNewTask resolves.
-            console.log(`[roo-lay] Task ${taskId} created by API.`);
-        });
-
-        this.rooCodeApi.on(RooCodeEventName.TaskStarted, genericEventHandler(RooCodeEventName.TaskStarted));
-        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId, usage) => genericEventHandler(RooCodeEventName.TaskCompleted)(taskId, { usage }));
-        this.rooCodeApi.on(RooCodeEventName.TaskAborted, genericEventHandler(RooCodeEventName.TaskAborted));
+        this.rooCodeApi.on(RooCodeEventName.TaskStarted, eventHandler('taskStarted'));
+        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, eventHandler('taskCompleted'));
+        this.rooCodeApi.on(RooCodeEventName.TaskAborted, eventHandler('taskAborted'));
     }
 
     public connect(): void {
-        if (!isExtensionActive || this.ws) return; // Prevent multiple connections
-
+        if (!globalState.isExtensionActive || this.ws) return;
         try {
-            if (!clientId) {
-                clientId = vscode.workspace.getConfiguration('roo-lay').get('clientId');
-                if (!clientId) {
-                    clientId = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest('hex');
-                    vscode.workspace.getConfiguration('roo-lay').update('clientId', clientId, vscode.ConfigurationTarget.Global);
-                }
+            if (!globalState.clientId) {
+                globalState.clientId = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest('hex');
             }
-            const urlWithClientId = `${WEBSOCKET_URL}?clientId=${clientId}`;
-            console.log(`Attempting to connect to WebSocket server at ${urlWithClientId}...`);
+            const urlWithClientId = `${WEBSOCKET_URL}?clientId=${globalState.clientId}`;
             this.ws = new WebSocket.WebSocket(urlWithClientId);
 
-            if (this.ws) {
-                this.ws.on('open', () => {
-                    console.log('WebSocket connected to Discord bot');
-                    reconnectDelay = RECONNECT_DELAY_MS; // Reset delay on successful connection
-                    
-                    // Clear any pending reconnect timeout
-                    if (reconnectTimeout) {
-                        clearTimeout(reconnectTimeout);
-                        reconnectTimeout = null;
-                    }
-                    
-                    // Note: Don't show connection message immediately - wait to see if we're active
-                });
-
-                this.ws.on('message', (data: WebSocket.RawData) => {
-                    try {
-                        const message = JSON.parse(data.toString());
-                        
-                        // Handle connection status messages
-                        if (message.type === 'connection') {
-                            vscode.window.showInformationMessage(`Connected to Discord bot: ${message.message}`);
-                            return;
-                        }
-                        
-                        this.handleDiscordMessage(message);
-                    } catch (error) {
-                        console.error('Error parsing WebSocket message:', error);
-                        vscode.window.showErrorMessage('Error parsing message from Discord bot');
-                    }
-                });
-
-                this.ws.on('close', (code: number, reason: string) => {
-                    console.log(`WebSocket connection closed: ${code} ${reason}`);
-                    this.ws = null;
-                    
-                    if (isExtensionActive) {
-                        this.scheduleReconnect();
-                    }
-                });
-
-                this.ws.on('error', (error: Error) => {
-                    console.error('WebSocket error:', error);
-                    vscode.window.showErrorMessage(`WebSocket error: ${error.message}`);
-                    this.ws = null;
-                    
-                    if (isExtensionActive) {
-                        this.scheduleReconnect();
-                    }
-                });
-            }
+            this.ws.on('open', () => {
+                globalState.reconnectDelay = RECONNECT_DELAY_MS;
+                if (globalState.reconnectTimeout) clearTimeout(globalState.reconnectTimeout);
+            });
+            this.ws.on('message', (data) => this.handleWebSocketMessage(data));
+            this.ws.on('close', () => this.handleWebSocketClose());
+            this.ws.on('error', (error) => console.error('[roo-lay] WebSocket error:', error));
 
         } catch (error) {
-            console.error('Failed to create WebSocket connection:', error);
-            if (isExtensionActive) {
-                this.scheduleReconnect();
-            }
+            if (globalState.isExtensionActive) this.scheduleReconnect();
         }
+    }
+
+    private handleWebSocketMessage(data: WebSocket.RawData): void {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'connection') {
+            this.isLeader = message.isActive;
+            vscode.window.setStatusBarMessage(`Roo-Lay: ${this.isLeader ? 'LEADER' : 'STANDBY'}`, 5000);
+        } else if (this.isLeader) {
+            this.handleDiscordMessage(message);
+        }
+    }
+
+    private handleWebSocketClose(): void {
+        this.ws = null;
+        this.isLeader = false;
+        vscode.window.setStatusBarMessage('Roo-Lay: Disconnected', 5000);
+        if (globalState.isExtensionActive) this.scheduleReconnect();
     }
 
     private scheduleReconnect(): void {
-        if (reconnectTimeout) return; // Already scheduled
-
-        console.log(`Scheduling reconnect in ${reconnectDelay}ms`);
-        reconnectTimeout = setTimeout(() => {
-            reconnectTimeout = null;
-            if (isExtensionActive) {
+        if (globalState.reconnectTimeout) return;
+        globalState.reconnectTimeout = setTimeout(() => {
+            globalState.reconnectTimeout = null;
+            if (globalState.isExtensionActive) {
                 this.connect();
-                // Exponential backoff with max delay
-                reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT_DELAY_MS);
+                globalState.reconnectDelay = Math.min(globalState.reconnectDelay * 1.5, MAX_RECONNECT_DELAY_MS);
             }
-        }, reconnectDelay);
+        }, globalState.reconnectDelay);
     }
 
     private async handleDiscordMessage(message: any): Promise<void> {
-        if (!this.rooCodeApi) {
-            console.error('Roo Code API not available');
-            return;
+        if (!this.rooCodeApi) return;
+        const { type, command, content, channelId } = message;
+        if (!channelId) return;
+
+        if (type === 'command' && command === 'reset') {
+            const currentTaskId = globalState.activeTaskIds.get(channelId);
+            if (currentTaskId) await this.rooCodeApi.cancelCurrentTask();
+            this.sendToDiscord({ type: 'ack', command: 'reset', channelId });
+        } else if (type === 'message' && content) {
+            const currentTaskId = globalState.activeTaskIds.get(channelId);
+            if (currentTaskId) {
+                try {
+                    await this.rooCodeApi.sendMessage(content);
+                } catch (error) {
+                    await this.startNewTaskForChannel(channelId, content);
+                }
+            } else {
+                await this.startNewTaskForChannel(channelId, content);
+            }
         }
+    }
 
+    private async startNewTaskForChannel(channelId: string, text: string): Promise<void> {
+        if (!this.rooCodeApi) return;
         try {
-            console.log('Received Discord message:', message);
-
-            const { type, command, content, channelId } = message;
-
-            if (!channelId) {
-                console.error('[roo-lay] Received message without channelId, cannot process.');
-                return;
-            }
-
-            const currentTaskId = activeTaskIds.get(channelId);
-
-            // Handle command messages
-            if (type === 'command') {
-                if (command === 'reset') {
-                    console.log(`[roo-lay] Processing reset command for channel ${channelId}`);
-                    if (currentTaskId) {
-                        await this.rooCodeApi.cancelCurrentTask(); // Assumes this cancels the task associated with the extension's internal state
-                        vscode.window.showInformationMessage(`Active task in channel ${channelId} cancelled by Discord reset command`);
-                    } else {
-                        vscode.window.showInformationMessage(`No active task in channel ${channelId} to reset`);
-                    }
-                } else if (command === 'save_to_kb') {
-                    console.log(`[roo-lay] Processing save_to_kb command for channel ${channelId}`);
-                    const knowledgeBasePrompt = `A user has submitted the following information to be saved to the knowledge base. Your task is to perform an intelligent assimilation by following the "Intelligent Assimilation Workflow" defined in the KNOWLEDGE_ASSIMILATION_PROTOCOL.md. Assess the content, decide whether to update, append, create, or discard it, and then execute the action. Provide a summary of your actions upon completion.\n\n---\n\n**Submitted Content:**\n${content}`;
-                    try {
-                        // This creates a new task, independent of the channel's main conversation
-                        const kbTaskId = await this.rooCodeApi.startNewTask({ text: knowledgeBasePrompt });
-                        channelIdByTaskId.set(kbTaskId, channelId); // Associate with channel for response
-                        vscode.window.showInformationMessage(`Knowledge base assimilation task ${kbTaskId} started for channel ${channelId}.`);
-                    } catch (error) {
-                        console.error('Failed to start knowledge base task:', error);
-                    }
-                }
-                return;
-            }
-
-            // Handle regular messages
-            if (type === 'message' && content) {
-                if (currentTaskId) {
-                    console.log(`[roo-lay] Sending message to existing task ${currentTaskId} in channel ${channelId}`);
-                    try {
-                        await this.rooCodeApi.sendMessage(content);
-                        vscode.window.showInformationMessage(`Message sent to active task in channel ${channelId}`);
-                    } catch (error) {
-                        console.error(`Failed to send message to existing task ${currentTaskId}:`, error);
-                        // This likely means the task was completed on the backend.
-                        // We'll start a new task with the user's message to continue the conversation.
-                        console.log(`[roo-lay] Starting new task for channel ${channelId} as previous task may have ended.`);
-                        try {
-                            const newTaskId = await this.rooCodeApi.startNewTask({ text: content });
-                            activeTaskIds.set(channelId, newTaskId);
-                            channelIdByTaskId.set(newTaskId, channelId);
-                            vscode.window.showInformationMessage(`New task ${newTaskId} started from channel ${channelId}`);
-                        } catch (startError) {
-                            console.error('Failed to start new task after sendMessage failed:', startError);
-                        }
-                    }
-                } else {
-                    console.log(`[roo-lay] No active task for channel ${channelId}, starting new task.`);
-                    try {
-                        const newTaskId = await this.rooCodeApi.startNewTask({ text: content });
-                        activeTaskIds.set(channelId, newTaskId);
-                        channelIdByTaskId.set(newTaskId, channelId);
-                        vscode.window.showInformationMessage(`New task ${newTaskId} started from channel ${channelId}`);
-                    } catch (error) {
-                        console.error('Failed to start new task:', error);
-                    }
-                }
-                return;
-            }
-
-            console.warn('Unhandled Discord message format:', message);
+            const newTaskId = await this.rooCodeApi.startNewTask({ text });
+            globalState.activeTaskIds.set(channelId, newTaskId);
+            globalState.channelIdByTaskId.set(newTaskId, channelId);
         } catch (error) {
-            console.error('Error handling Discord message:', error);
-            vscode.window.showErrorMessage(`Error processing Discord message: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            console.error('[roo-lay] Failed to start new task:', error);
         }
     }
 
     private sendToDiscord(data: any): void {
-        if (this.ws && this.ws.readyState === WebSocket.WebSocket.OPEN) {
-            try {
-                this.ws.send(JSON.stringify(data));
-            } catch (error) {
-                console.error('Error sending message to Discord bot:', error);
-            }
-        } else {
-            console.warn('WebSocket not connected, cannot send message to Discord bot');
+        if (this.ws?.readyState === WebSocket.WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(data));
         }
     }
 
@@ -370,69 +205,28 @@ class WebSocketClient {
     }
 
     public disconnect(): void {
-        isExtensionActive = false;
-        
-        if (reconnectTimeout) {
-            clearTimeout(reconnectTimeout);
-            reconnectTimeout = null;
-        }
-
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
-        }
+        globalState.isExtensionActive = false;
+        if (globalState.reconnectTimeout) clearTimeout(globalState.reconnectTimeout);
+        this.ws?.close();
     }
 }
 
+// --- VS Code Extension Activation ---
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Congratulations, "roo-lay" is now active!');
-    
-    isExtensionActive = true;
-    
-    // Ensure only one instance of the client is created (singleton)
-    if (!wsClientInstance) {
-        console.log('Creating new WebSocketClient instance.');
-        wsClientInstance = new WebSocketClient(context);
-        wsClientInstance.connect();
-
-        // Cleanup on deactivation
-        context.subscriptions.push(new vscode.Disposable(() => {
-            if (wsClientInstance) {
-                wsClientInstance.disconnect();
-                wsClientInstance = null;
-            }
-        }));
-    } else {
-        console.log('WebSocketClient instance already exists.');
-        // Only reconnect if not currently connected
-        if (!wsClientInstance.isConnected()) {
-            console.log('Reconnecting existing WebSocketClient instance.');
-            wsClientInstance.connect();
-        } else {
-            console.log('WebSocketClient already connected.');
-        }
+    globalState.isExtensionActive = true;
+    if (!globalState.wsClientInstance) {
+        globalState.wsClientInstance = new WebSocketClient();
     }
+    globalState.wsClientInstance.connect();
 
-    // Register commands if needed
-    const disposable = vscode.commands.registerCommand('roo-lay.triggerRooCode', () => {
-        vscode.window.showInformationMessage('Roo Relay is active and connected via WebSocket');
-    });
-
-    context.subscriptions.push(disposable);
+    context.subscriptions.push(new vscode.Disposable(() => {
+        globalState.wsClientInstance?.disconnect();
+        globalState.wsClientInstance = null;
+    }));
 }
 
 export function deactivate() {
-    console.log('"roo-lay" is now deactivated!');
-    
-    isExtensionActive = false;
-    
-    if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-        reconnectTimeout = null;
-    }
-    
-    if (wsClientInstance) {
-        wsClientInstance.disconnect();
-        wsClientInstance = null;
-    }
+    globalState.isExtensionActive = false;
+    globalState.wsClientInstance?.disconnect();
+    globalState.wsClientInstance = null;
 }

@@ -20,10 +20,11 @@ if (!CLIENT_ID) {
     process.exit(1);
 }
 
-if (!GUILD_ID) {
-    console.error('❌ GUILD_ID is required in environment variables');
-    process.exit(1);
-}
+// GUILD_ID is no longer required for global commands.
+// if (!GUILD_ID) {
+//     console.error('❌ GUILD_ID is required in environment variables');
+//     process.exit(1);
+// }
 
 // Define the slash commands
 const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
@@ -68,6 +69,11 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
             },
         ],
     },
+    {
+        name: 'stop',
+        description: 'Stops the bot and all associated processes gracefully.',
+        type: ApplicationCommandType.ChatInput,
+    },
 ];
 
 // Create REST client
@@ -78,9 +84,9 @@ async function deployCommands() {
     try {
         console.log('🔄 Started refreshing application (/) commands.');
 
-        // Register commands for a specific guild
+        // Register commands globally
         await rest.put(
-            Routes.applicationGuildCommands(CLIENT_ID!, GUILD_ID!),
+            Routes.applicationCommands(CLIENT_ID!),
             { body: commands }
         );
 

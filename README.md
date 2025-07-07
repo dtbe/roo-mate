@@ -113,6 +113,7 @@ Use these slash commands in Discord to manage your conversation:
 
 - `/reset` - Start a fresh conversation (clears context)
 - `/new` - Begin a new conversation session
+- `/stop` - Stops the bot and all associated processes gracefully.
 
 ### Troubleshooting
 
