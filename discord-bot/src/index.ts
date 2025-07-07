@@ -9,7 +9,6 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const WEBSOCKET_PORT = parseInt(process.env.WEBSOCKET_PORT || '8080');
 const PUBLIC_CHANNEL_ID = process.env.PUBLIC_CHANNEL_ID;
 const PRIVATE_CHANNEL_ID = process.env.PRIVATE_CHANNEL_ID;
-const DEBOUNCE_DELAY_MS = 350;
 
 if (!DISCORD_TOKEN || !PUBLIC_CHANNEL_ID || !PRIVATE_CHANNEL_ID) {
     console.error('❌ DISCORD_TOKEN, PUBLIC_CHANNEL_ID, and PRIVATE_CHANNEL_ID are required.');
@@ -25,73 +24,89 @@ const wss = new WebSocketServer({ port: WEBSOCKET_PORT });
 const connectedClients = new Map<string, WebSocket>();
 const clientConnectionOrder: string[] = [];
 const pendingResetAcks = new Map<string, (value: unknown) => void>();
-const activeStreamingMessages = new Map<string, Message>();
-const messageBuffers = new Map<string, any>();
-const debounceTimers = new Map<string, NodeJS.Timeout>();
 
 // --- Message Formatting ---
 function formatEventForDiscord(eventName: string, data: any): { content: string | null; embeds?: EmbedBuilder[] } {
-    if (eventName !== 'message') return { content: null };
+    if (eventName === 'message' && data.message) {
+        const msg = data.message;
+        
+        // Skip internal processing messages
+        if (msg.say === 'user_feedback') return { content: null };
+        if (msg.say === 'reasoning') return { content: null };
+        if (msg.say === 'api_req_started') return { content: null };
+        if (msg.say === 'api_req_finished') return { content: null };
+        if (msg.say === 'command_output') return { content: null };
+        if (msg.text && msg.text.includes('Failed to fetch LiteLLM models')) return { content: null };
 
-    const msg = data.message;
-    if (msg.text && msg.text.includes('Failed to fetch LiteLLM models')) return { content: null };
+        // Show tool usage (may need approval)
+        if (msg.say === 'tool') return { content: `🛠️ Using a tool...` };
+        
+        // Only show meaningful text responses (prevent echoing user messages)
+        if (msg.say === 'text' && msg.text?.trim() && !msg.text.startsWith('{"request":')) {
+            return { content: msg.text };
+        }
+        
+        // Handle completion results
+        if (msg.say === 'completion_result' && msg.text?.trim()) {
+            return { content: msg.text };
+        }
 
-    if (msg.say === 'reasoning') return { content: `🤔 *${msg.reasoning || msg.text || 'Processing...'}*` };
-    if (msg.say === 'tool') return { content: `🛠️ Using a tool...` };
-    if (msg.say === 'text' && msg.text?.trim()) return { content: msg.text };
-
-    if (msg.ask === 'followup') {
-        try {
-            const parsed = JSON.parse(msg.text);
-            let formatted = `❓ **Question:**\n${parsed.question || ''}`;
-            if (Array.isArray(parsed.suggest)) {
-                formatted += '\n\n**Please choose an option:**';
-                parsed.suggest.forEach((choice: any, index: number) => {
-                    formatted += `\n${index + 1}. ${choice.label || choice.answer}`;
-                });
+        // Show questions to user
+        if (msg.ask === 'followup') {
+            try {
+                const parsed = JSON.parse(msg.text);
+                let formatted = `❓ **Question:**\n${parsed.question || ''}`;
+                if (Array.isArray(parsed.suggest)) {
+                    formatted += '\n\n**Please choose an option:**';
+                    parsed.suggest.forEach((choice: any, index: number) => {
+                        formatted += `\n\n${index + 1}. ${choice.label || choice.answer}`;
+                    });
+                }
+                return { content: formatted };
+            } catch (e) {
+                return { content: `❓ **Question:**\n${msg.text}` };
             }
-            return { content: formatted };
-        } catch (e) {
-            return { content: `❓ **Question:**\n${msg.text}` };
         }
     }
+    // For all other events or message types, return nothing to display.
     return { content: null };
 }
 
 // --- Message Sending Logic ---
-async function sendOrUpdateMessage(channelId: string, options: { content: string | null; embeds?: EmbedBuilder[] }) {
+async function sendMessage(channelId: string, options: { content: string | null; embeds?: EmbedBuilder[] }) {
     const { content, embeds } = options;
     if (!content && (!embeds || embeds.length === 0)) return;
 
     const channel = await client.channels.fetch(channelId);
     if (!channel?.isTextBased()) return;
 
-    const existingMessage = activeStreamingMessages.get(channelId);
-
     try {
-        if (existingMessage) {
-            const newContent = (existingMessage.content + (content || '')).slice(-2000);
-            await existingMessage.edit({ content: newContent, embeds });
-        } else {
-            const sentMessage = await (channel as TextChannel).send({ content: content || undefined, embeds });
-            activeStreamingMessages.set(channelId, sentMessage);
-        }
+        await (channel as TextChannel).send({ content: content || undefined, embeds });
     } catch (error) {
-        console.error(`❌ Error sending/editing message:`, error);
-        activeStreamingMessages.delete(channelId); // Reset on error
+        console.error(`❌ Error sending message:`, error);
     }
 }
 
-function processDebouncedMessage(channelId: string) {
-    const bufferedData = messageBuffers.get(channelId);
-    if (bufferedData) {
-        const formatted = formatEventForDiscord('message', bufferedData);
-        if (formatted) {
-            sendOrUpdateMessage(channelId, formatted);
-        }
+
+function processMessage(channelId: string, eventName: string, data: any) {
+    const isPartial = data?.message?.partial;
+    
+    // Skip all partial messages to avoid streaming issues in Discord
+    if (isPartial) {
+        return;
     }
-    messageBuffers.delete(channelId);
+    
+    const formatted = formatEventForDiscord(eventName, data);
+    
+    // Skip null content to avoid unnecessary processing
+    if (!formatted.content && (!formatted.embeds || formatted.embeds.length === 0)) {
+        return;
+    }
+    
+    // Only send final messages (non-partial)
+    sendMessage(channelId, formatted);
 }
+
 
 // --- WebSocket Logic ---
 wss.on('connection', (ws: WebSocket, req) => {
@@ -114,22 +129,13 @@ wss.on('connection', (ws: WebSocket, req) => {
         console.log('📨 WS Received:', message);
 
         if (message.type === 'ack' && message.command === 'reset') {
+            console.log('✅ Reset ACK received for channel:', message.channelId);
             pendingResetAcks.get(message.channelId)?.(true);
             pendingResetAcks.delete(message.channelId);
         } else if (message.type === 'event' && message.channelId) {
-            const { channelId, data: eventData } = message;
-            const isPartial = eventData?.message?.partial;
-
-            if (debounceTimers.has(channelId)) clearTimeout(debounceTimers.get(channelId)!);
-
-            messageBuffers.set(channelId, eventData);
-
-            if (isPartial) {
-                const timer = setTimeout(() => processDebouncedMessage(channelId), DEBOUNCE_DELAY_MS);
-                debounceTimers.set(channelId, timer);
-            } else {
-                processDebouncedMessage(channelId);
-                activeStreamingMessages.delete(channelId); // Final message, clear for next one
+            // Only 'message' events are processed for display
+            if (message.eventName === 'message') {
+                processMessage(message.channelId, message.eventName, message.data);
             }
         }
     });
@@ -180,30 +186,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand() || !ALLOWED_CHANNELS.includes(interaction.channelId)) return;
     const { commandName, options, channelId } = interaction;
 
-    if (commandName === 'reset' || commandName === 'new') {
-        broadcastToActiveClient({ type: 'command', command: 'reset', channelId });
+    if (commandName === 'reset' || commandName === 'new' || commandName === 'stop') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const ackReceived = await new Promise(resolve => {
-            pendingResetAcks.set(channelId, resolve);
-            setTimeout(() => {
+        const ackPromise = new Promise(resolve => {
+            const timeout = setTimeout(() => {
                 if (pendingResetAcks.has(channelId)) {
                     pendingResetAcks.delete(channelId);
-                    resolve(false);
+                    resolve(false); // Timeout
                 }
             }, 5000);
+
+            pendingResetAcks.set(channelId, (value) => {
+                clearTimeout(timeout);
+                resolve(value);
+            });
         });
 
+        broadcastToActiveClient({ type: 'command', command: commandName, channelId });
+
+        const ackReceived = await ackPromise;
+
         if (!ackReceived) {
-            await interaction.editReply({ content: '❌ Reset command timed out.' });
+            await interaction.editReply({ content: '❌ Reset command timed out. The VS Code extension may be disconnected or unresponsive.' });
             return;
         }
 
         if (commandName === 'new') {
             broadcastToActiveClient({ type: 'message', content: options.getString('message', true), channelId });
             await interaction.editReply({ content: '🚀 New task started!' });
-        } else {
-            await interaction.editReply({ content: '✅ Task reset successfully.' });
+        } else { // For 'reset' and 'stop'
+            await interaction.editReply({ content: `✅ Task ${commandName}ped successfully.` });
         }
     }
 });

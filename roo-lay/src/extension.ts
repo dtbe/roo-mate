@@ -165,18 +165,22 @@ class WebSocketClient {
         const { type, command, content, channelId } = message;
         if (!channelId) return;
 
-        if (type === 'command' && command === 'reset') {
-            const currentTaskId = globalState.activeTaskIds.get(channelId);
-            if (currentTaskId) await this.rooCodeApi.cancelCurrentTask();
+        if (type === 'command' && (command === 'reset' || command === 'stop')) {
+            // Acknowledge immediately to prevent Discord timeout
             this.sendToDiscord({ type: 'ack', command: 'reset', channelId });
+
+            try {
+                const currentTaskId = globalState.activeTaskIds.get(channelId);
+                if (currentTaskId) {
+                    await this.rooCodeApi.cancelCurrentTask();
+                }
+            } catch (error) {
+                console.error(`[roo-lay] Error during cancelCurrentTask for command '${command}'.`, error);
+            }
         } else if (type === 'message' && content) {
             const currentTaskId = globalState.activeTaskIds.get(channelId);
             if (currentTaskId) {
-                try {
-                    await this.rooCodeApi.sendMessage(content);
-                } catch (error) {
-                    await this.startNewTaskForChannel(channelId, content);
-                }
+                await this.rooCodeApi.sendMessage(content);
             } else {
                 await this.startNewTaskForChannel(channelId, content);
             }
