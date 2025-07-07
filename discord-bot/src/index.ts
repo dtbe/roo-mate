@@ -36,8 +36,9 @@ const client = new Client({
 // WebSocket server setup
 const wss = new WebSocketServer({ port: WEBSOCKET_PORT });
 
-// Store connected WebSocket clients
+// Store connected WebSocket clients in connection order
 const connectedClients = new Map<string, WebSocket>();
+const clientConnectionOrder: string[] = [];
 const messageQueue: any[] = [];
 
 // Store context and pending actions per channel
@@ -240,11 +241,21 @@ wss.on('connection', (ws: WebSocket, req) => {
     if (connectedClients.has(clientId)) {
         console.log(`🔌 Client ${clientId} reconnected, closing old connection.`);
         connectedClients.get(clientId)?.terminate();
+        // Remove from connection order and re-add at the end
+        const index = clientConnectionOrder.indexOf(clientId);
+        if (index > -1) {
+            clientConnectionOrder.splice(index, 1);
+        }
     }
 
     console.log(`🔌 New WebSocket connection established for client: ${clientId}`);
     connectedClients.set(clientId, ws);
+    clientConnectionOrder.push(clientId);
     (ws as any).clientId = clientId;
+
+    // Log if this client is now the active (first) client
+    const isActive = clientConnectionOrder[0] === clientId;
+    console.log(`🎯 Client ${clientId} is ${isActive ? 'ACTIVE' : 'STANDBY'} (position ${clientConnectionOrder.indexOf(clientId) + 1}/${clientConnectionOrder.length})`);
 
     // Send any queued messages
     if (messageQueue.length > 0) {
@@ -291,6 +302,15 @@ wss.on('connection', (ws: WebSocket, req) => {
         console.log(`🔌 WebSocket connection closed for client: ${closedClientId}`);
         if (closedClientId) {
             connectedClients.delete(closedClientId);
+            // Remove from connection order
+            const index = clientConnectionOrder.indexOf(closedClientId);
+            if (index > -1) {
+                clientConnectionOrder.splice(index, 1);
+                console.log(`📋 Client connection order updated: [${clientConnectionOrder.join(', ')}]`);
+                if (clientConnectionOrder.length > 0) {
+                    console.log(`🎯 New active client: ${clientConnectionOrder[0]}`);
+                }
+            }
         }
     });
     
@@ -299,38 +319,65 @@ wss.on('connection', (ws: WebSocket, req) => {
         console.error(`❌ WebSocket error for client ${errorClientId}:`, error);
         if (errorClientId) {
             connectedClients.delete(errorClientId);
+            // Remove from connection order
+            const index = clientConnectionOrder.indexOf(errorClientId);
+            if (index > -1) {
+                clientConnectionOrder.splice(index, 1);
+                console.log(`📋 Client connection order updated after error: [${clientConnectionOrder.join(', ')}]`);
+                if (clientConnectionOrder.length > 0) {
+                    console.log(`🎯 New active client: ${clientConnectionOrder[0]}`);
+                }
+            }
         }
     });
     
-    // Send welcome message to new client
+    // Send welcome message to new client with status
+    const isActiveClient = clientConnectionOrder[0] === clientId;
     ws.send(JSON.stringify({
         type: 'connection',
-        message: 'Connected to Discord bot WebSocket server',
-        timestamp: new Date().toISOString()
+        message: `Connected to Discord bot WebSocket server - ${isActiveClient ? 'ACTIVE' : 'STANDBY'}`,
+        timestamp: new Date().toISOString(),
+        isActive: isActiveClient,
+        position: clientConnectionOrder.indexOf(clientId) + 1,
+        totalClients: clientConnectionOrder.length
     }));
 });
 
-// Function to broadcast message to all connected WebSocket clients
+// Function to send message to active (first) client only
 function broadcastToClients(data: any) {
     const message = JSON.stringify(data);
 
-    if (connectedClients.size === 0) {
+    if (clientConnectionOrder.length === 0) {
         console.log('🔌 No clients connected, queueing message.');
         messageQueue.push(data);
         return;
     }
     
-    connectedClients.forEach((client, clientId) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        } else {
-            // Remove closed connections
-            console.log(`🔌 Removing stale connection for client: ${clientId}`);
-            connectedClients.delete(clientId);
-        }
-    });
+    // Only send to the first (active) client
+    const activeClientId = clientConnectionOrder[0];
+    const activeClient = connectedClients.get(activeClientId);
     
-    console.log(`📤 Broadcasted message to ${connectedClients.size} client(s)`);
+    if (activeClient && activeClient.readyState === WebSocket.OPEN) {
+        activeClient.send(message);
+        console.log(`📤 Sent message to active client: ${activeClientId} (1 of ${clientConnectionOrder.length} connected)`);
+    } else {
+        // Active client is stale, remove it and try the next one
+        console.log(`🔌 Removing stale active client: ${activeClientId}`);
+        connectedClients.delete(activeClientId);
+        const index = clientConnectionOrder.indexOf(activeClientId);
+        if (index > -1) {
+            clientConnectionOrder.splice(index, 1);
+        }
+        
+        // Recursively try with the new active client
+        if (clientConnectionOrder.length > 0) {
+            console.log(`🎯 Promoting next client to active: ${clientConnectionOrder[0]}`);
+            broadcastToClients(data);
+        } else {
+            console.log('🔌 No more clients available, queueing message.');
+            messageQueue.push(data);
+        }
+    }
 }
 
 // Discord bot event handlers

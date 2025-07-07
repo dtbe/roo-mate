@@ -198,7 +198,6 @@ class WebSocketClient {
             if (this.ws) {
                 this.ws.on('open', () => {
                     console.log('WebSocket connected to Discord bot');
-                    vscode.window.showInformationMessage('Connected to Discord bot');
                     reconnectDelay = RECONNECT_DELAY_MS; // Reset delay on successful connection
                     
                     // Clear any pending reconnect timeout
@@ -206,11 +205,20 @@ class WebSocketClient {
                         clearTimeout(reconnectTimeout);
                         reconnectTimeout = null;
                     }
+                    
+                    // Note: Don't show connection message immediately - wait to see if we're active
                 });
 
                 this.ws.on('message', (data: WebSocket.RawData) => {
                     try {
                         const message = JSON.parse(data.toString());
+                        
+                        // Handle connection status messages
+                        if (message.type === 'connection') {
+                            vscode.window.showInformationMessage(`Connected to Discord bot: ${message.message}`);
+                            return;
+                        }
+                        
                         this.handleDiscordMessage(message);
                     } catch (error) {
                         console.error('Error parsing WebSocket message:', error);
