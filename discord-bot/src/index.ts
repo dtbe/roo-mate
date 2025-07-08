@@ -92,7 +92,7 @@ function processMessage(channelId: string, eventName: string, data: any) {
     const isPartial = data?.message?.partial;
     
     // Skip all partial messages to avoid streaming issues in Discord
-    if (isPartial) {
+    if (isPartial && data?.message?.say !== 'completion_result') {
         return;
     }
     
