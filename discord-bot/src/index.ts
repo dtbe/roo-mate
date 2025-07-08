@@ -48,7 +48,7 @@ function formatEventForDiscord(eventName: string, data: any): { content: string 
         
         // Handle completion results
         if (msg.say === 'completion_result' && msg.text?.trim()) {
-            return { content: msg.text };
+            return { content: `✅ ${msg.text}` };
         }
 
         // Show questions to user
@@ -64,10 +64,16 @@ function formatEventForDiscord(eventName: string, data: any): { content: string 
                 }
                 return { content: formatted };
             } catch (e) {
-                return { content: `❓ **Question:**\n${msg.text}` };
+                return { content: `❔ **Question:**\n${msg.text}` };
             }
         }
     }
+    
+    if (eventName === 'taskCompleted') {
+        // This message is often redundant with completion_result, so we suppress it.
+        return { content: null };
+    }
+
     // For all other events or message types, return nothing to display.
     return { content: null };
 }
@@ -92,7 +98,7 @@ function processMessage(channelId: string, eventName: string, data: any) {
     const isPartial = data?.message?.partial;
     
     // Skip all partial messages to avoid streaming issues in Discord
-    if (isPartial && data?.message?.say !== 'completion_result') {
+    if (isPartial) {
         return;
     }
     
@@ -128,13 +134,13 @@ wss.on('connection', (ws: WebSocket, req) => {
         const message = JSON.parse(data.toString());
         console.log('📨 WS Received:', message);
 
-        if (message.type === 'ack' && message.command === 'reset') {
-            console.log('✅ Reset ACK received for channel:', message.channelId);
+        if (message.type === 'ack' && pendingResetAcks.has(message.channelId)) {
+            console.log(`✅ ACK received for command on channel: ${message.channelId}`);
             pendingResetAcks.get(message.channelId)?.(true);
             pendingResetAcks.delete(message.channelId);
         } else if (message.type === 'event' && message.channelId) {
-            // Only 'message' events are processed for display
-            if (message.eventName === 'message') {
+            // Process 'message' and 'taskCompleted' events for display
+            if (message.eventName === 'message' || message.eventName === 'taskCompleted') {
                 processMessage(message.channelId, message.eventName, message.data);
             }
         }
@@ -216,7 +222,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             broadcastToActiveClient({ type: 'message', content: options.getString('message', true), channelId });
             await interaction.editReply({ content: '🚀 New task started!' });
         } else { // For 'reset' and 'stop'
-            await interaction.editReply({ content: `✅ Task ${commandName}ped successfully.` });
+            const action = commandName === 'reset' ? 'reset' : 'stopped';
+            await interaction.editReply({ content: `✅ Task ${action} successfully.` });
         }
     }
 });

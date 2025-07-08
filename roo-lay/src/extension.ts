@@ -91,10 +91,6 @@ class WebSocketClient {
             const channelId = globalState.channelIdByTaskId.get(taskId);
             if (channelId) {
                 this.sendToDiscord({ type: 'event', eventName, channelId, data: { taskId, ...data } });
-                if (eventName === 'taskCompleted' || eventName === 'taskAborted') {
-                    globalState.activeTaskIds.delete(channelId);
-                    globalState.channelIdByTaskId.delete(taskId);
-                }
             }
         };
 
@@ -105,9 +101,19 @@ class WebSocketClient {
                 this.sendToDiscord({ type: 'event', eventName: 'message', channelId, data: event });
             }
         });
+        
         this.rooCodeApi.on(RooCodeEventName.TaskStarted, eventHandler('taskStarted'));
         this.rooCodeApi.on(RooCodeEventName.TaskCompleted, eventHandler('taskCompleted'));
-        this.rooCodeApi.on(RooCodeEventName.TaskAborted, eventHandler('taskAborted'));
+
+        this.rooCodeApi.on(RooCodeEventName.TaskAborted, (taskId) => {
+            if (!this.isLeader) return;
+            const channelId = globalState.channelIdByTaskId.get(taskId);
+            if (channelId) {
+                this.sendToDiscord({ type: 'event', eventName: 'taskAborted', channelId, data: { taskId } });
+                globalState.activeTaskIds.delete(channelId);
+                globalState.channelIdByTaskId.delete(taskId);
+            }
+        });
     }
 
     public connect(): void {
@@ -165,9 +171,9 @@ class WebSocketClient {
         const { type, command, content, channelId } = message;
         if (!channelId) return;
 
-        if (type === 'command' && (command === 'reset' || command === 'stop')) {
+        if (type === 'command' && (command === 'reset' || command === 'stop' || command === 'new')) {
             // Acknowledge immediately to prevent Discord timeout
-            this.sendToDiscord({ type: 'ack', command: 'reset', channelId });
+            this.sendToDiscord({ type: 'ack', command: command, channelId });
 
             try {
                 const currentTaskId = globalState.activeTaskIds.get(channelId);
