@@ -114,6 +114,16 @@ class WebSocketClient {
                 globalState.channelIdByTaskId.delete(taskId);
             }
         });
+
+        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId) => {
+            if (!this.isLeader) return;
+            const channelId = globalState.channelIdByTaskId.get(taskId);
+            if (channelId) {
+                // Clear both mappings on task completion
+                globalState.activeTaskIds.delete(channelId);
+                globalState.channelIdByTaskId.delete(taskId);
+            }
+        });
     }
 
     public connect(): void {
@@ -179,6 +189,9 @@ class WebSocketClient {
                 const currentTaskId = globalState.activeTaskIds.get(channelId);
                 if (currentTaskId) {
                     await this.rooCodeApi.cancelCurrentTask();
+                    // Clear task mappings after cancellation
+                    globalState.activeTaskIds.delete(channelId);
+                    globalState.channelIdByTaskId.delete(currentTaskId);
                 }
             } catch (error) {
                 console.error(`[roo-lay] Error during cancelCurrentTask for command '${command}'.`, error);

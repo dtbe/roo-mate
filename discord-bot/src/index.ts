@@ -37,6 +37,10 @@ function formatEventForDiscord(eventName: string, data: any): { content: string 
         if (msg.say === 'api_req_finished') return { content: null };
         if (msg.say === 'command_output') return { content: null };
         if (msg.text && msg.text.includes('Failed to fetch LiteLLM models')) return { content: null };
+        // Filter out rate limiting messages
+        if (msg.text && (msg.text.includes('rate limiting') || msg.text.includes('rate limit'))) {
+            return { content: null };
+        }
 
         // Show tool usage (may need approval)
         if (msg.say === 'tool') return { content: `🛠️ Using a tool...` };
@@ -219,7 +223,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         if (commandName === 'new') {
-            broadcastToActiveClient({ type: 'message', content: options.getString('message', true), channelId });
+            // Add delay to ensure reset completes before new message
+            setTimeout(() => {
+                broadcastToActiveClient({ type: 'message', content: options.getString('message', true), channelId });
+            }, 500);
             await interaction.editReply({ content: '🚀 New task started!' });
         } else { // For 'reset' and 'stop'
             const action = commandName === 'reset' ? 'reset' : 'stopped';
