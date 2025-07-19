@@ -27,7 +27,21 @@
         "command": "roo-lay.triggerRooCode",
         "title": "Trigger Roo Code LLM"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Roo-Lay Configuration",
+      "properties": {
+        "roo-lay.websocket.port": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "The WebSocket port the Roo-Lay bot is listening on. Must be configured per workspace to enable connection.",
+          "scope": "resource"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run esbuild-prod",

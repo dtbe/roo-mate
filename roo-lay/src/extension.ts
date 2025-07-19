@@ -46,7 +46,6 @@ interface RooCodeAPI extends EventEmitter<RooCodeEvents> {
 }
 
 // --- WebSocket and State Configuration ---
-const WEBSOCKET_URL = 'ws://localhost:8080';
 const RECONNECT_DELAY_MS = 3000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 
@@ -115,24 +114,27 @@ class WebSocketClient {
             }
         });
 
-        this.rooCodeApi.on(RooCodeEventName.TaskCompleted, (taskId) => {
-            if (!this.isLeader) return;
-            const channelId = globalState.channelIdByTaskId.get(taskId);
-            if (channelId) {
-                // Clear both mappings on task completion
-                globalState.activeTaskIds.delete(channelId);
-                globalState.channelIdByTaskId.delete(taskId);
-            }
-        });
     }
 
     public connect(): void {
         if (!globalState.isExtensionActive || this.ws) return;
+
+        const configuration = vscode.workspace.getConfiguration('roo-lay');
+        const port = configuration.get<number>('websocket.port');
+
+        if (!port) {
+            vscode.window.setStatusBarMessage('Roo-Lay: Port not configured.', 10000);
+            // We don't treat this as an error, the user may not want it active in this workspace.
+            // We will periodically re-check in case the setting is added.
+            this.scheduleReconnect();
+            return;
+        }
+
         try {
             if (!globalState.clientId) {
                 globalState.clientId = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest('hex');
             }
-            const urlWithClientId = `${WEBSOCKET_URL}?clientId=${globalState.clientId}`;
+            const urlWithClientId = `ws://localhost:${port}?clientId=${globalState.clientId}`;
             this.ws = new WebSocket.WebSocket(urlWithClientId);
 
             this.ws.on('open', () => {
@@ -141,7 +143,10 @@ class WebSocketClient {
             });
             this.ws.on('message', (data) => this.handleWebSocketMessage(data));
             this.ws.on('close', () => this.handleWebSocketClose());
-            this.ws.on('error', (error) => console.error('[roo-lay] WebSocket error:', error));
+            this.ws.on('error', (error) => {
+                vscode.window.setStatusBarMessage('Roo-Lay: Connection Error', 5000);
+                console.error('[roo-lay] WebSocket error:', error)
+            });
 
         } catch (error) {
             if (globalState.isExtensionActive) this.scheduleReconnect();

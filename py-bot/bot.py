@@ -6,15 +6,23 @@ import asyncio
 import websockets
 import json
 import logging
+import argparse
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# --- Argument Parsing ---
+parser = argparse.ArgumentParser(description="Run a configurable Discord bot.")
+parser.add_argument("--port", type=int, required=True, help="WebSocket port to listen on.")
+parser.add_argument("--token-var", type=str, default="DISCORD_TOKEN", help="Environment variable name for the Discord token.")
+parser.add_argument("--channel-var", type=str, required=True, help="Environment variable name for the target channel ID.")
+args = parser.parse_args()
+
 # --- Load Environment Variables ---
 load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_TOKEN = os.getenv(args.token_var)
 # The only channel the bot will listen to for messages and commands.
-TESTING_CHANNEL_ID = os.getenv("TESTING_CHANNEL_ID") 
+TARGET_CHANNEL_ID = os.getenv(args.channel_var)
 
 # --- State Management ---
 class BotState:
@@ -45,13 +53,13 @@ async def send_long_message(channel, text):
 @bot.event
 async def on_ready():
     logging.info(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
-    logging.info(f'Listening only in channel: {TESTING_CHANNEL_ID}')
+    logging.info(f'Listening only in channel: {TARGET_CHANNEL_ID}')
     logging.info('------')
 
 @bot.event
 async def on_message(message):
     # Ignore messages from the bot itself or from any other channel
-    if message.author.bot or str(message.channel.id) != TESTING_CHANNEL_ID:
+    if message.author.bot or str(message.channel.id) != TARGET_CHANNEL_ID:
         return
 
     # Let the library process any potential commands first
@@ -166,8 +174,8 @@ async def websocket_handler(websocket):
         state.websocket_client = None
 
 async def start_websocket_server():
-    logging.info("Starting WebSocket server on localhost:8080...")
-    state.websocket_server = await websockets.serve(websocket_handler, "localhost", 8080)
+    logging.info(f"Starting WebSocket server on localhost:{args.port}...")
+    state.websocket_server = await websockets.serve(websocket_handler, "localhost", args.port)
     try:
         await state.websocket_server.wait_closed()
     except asyncio.CancelledError:
@@ -175,8 +183,8 @@ async def start_websocket_server():
 
 # --- Main Execution ---
 async def main():
-    if not all([DISCORD_TOKEN, TESTING_CHANNEL_ID]):
-        logging.error("DISCORD_TOKEN and TESTING_CHANNEL_ID must be set in the .env file.")
+    if not all([DISCORD_TOKEN, TARGET_CHANNEL_ID]):
+        logging.error(f"Environment variables '{args.token_var}' and '{args.channel_var}' must be set.")
         return
 
     async with bot:
