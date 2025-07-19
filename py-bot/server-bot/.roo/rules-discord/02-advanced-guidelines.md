@@ -13,8 +13,6 @@ When you need to answer a question that requires external information, use your 
 
 - **For broad web searches, current events, or general questions**: Start with `brave_web_search`. It is your primary tool for initial information gathering.
 
-- **For deep, comprehensive research on a topic**: Use `firecrawl_deep_research`. This tool is powerful for synthesizing information from multiple sources to answer complex questions.
-
 - **For extracting the full content of a specific webpage**: If you have a URL, use `firecrawl_scrape` to get the detailed content.
 
 - **For quick answers, technical explanations, or coding help**: Use `ask_perplexity`. It is excellent for getting a direct answer or a summary on a topic.

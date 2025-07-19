@@ -29,6 +29,7 @@ class BotState:
     def __init__(self):
         self.websocket_client = None
         self.websocket_server = None
+        self.task_message_buffer = {}  # Key: taskId, Value: latest message content
 
 state = BotState()
 
@@ -42,6 +43,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # --- Helper Functions ---
 async def send_long_message(channel, text):
     """Sends a message, splitting it into chunks if it's too long."""
+    if not text or not isinstance(text, str) or not text.strip():
+        logging.warning("Attempted to send an empty or invalid message.")
+        return
+
     if len(text) <= 2000:
         await channel.send(text)
     else:
@@ -156,25 +161,45 @@ async def websocket_handler(websocket):
         async for message in websocket:
             logging.info(f"Received message from WebSocket: {message}")
             data = json.loads(message)
-            
+
+            if data.get('type') != 'event' or data.get('eventName') != 'message':
+                continue
+
+            event_data = data.get('data', {})
+            msg_payload = event_data.get('message', {})
+            task_id = event_data.get('taskId')
+            channel_id = data.get('channelId')
+
+            if not all([msg_payload, task_id, channel_id]):
+                continue
+
             formatted_content = format_and_filter_message(data)
+            if not formatted_content:
+                continue
             
-            if formatted_content:
-                channel_id = data.get('channelId')
-                if channel_id:
-                    logging.info(f"Relaying formatted message to Discord channel {channel_id}")
-                    try:
-                        channel = await bot.fetch_channel(int(channel_id))
-                        await send_long_message(channel, formatted_content)
-                    except discord.NotFound:
-                        logging.error(f"Discord channel {channel_id} not found.")
-                    except Exception as e:
-                        logging.error(f"Failed to send message to channel {channel_id}: {e}")
+            is_partial = msg_payload.get('partial', False)
+
+            if is_partial:
+                # Buffer the partial message content
+                state.task_message_buffer[task_id] = formatted_content
+                logging.info(f"Buffered partial message for task {task_id}")
+            else:
+                # This is the final message
+                final_content = state.task_message_buffer.pop(task_id, formatted_content)
+                logging.info(f"Received final message for task {task_id}. Sending to Discord.")
+                try:
+                    channel = await bot.fetch_channel(int(channel_id))
+                    await send_long_message(channel, final_content)
+                except discord.NotFound:
+                    logging.error(f"Discord channel {channel_id} not found.")
+                except Exception as e:
+                    logging.error(f"Failed to send final message to channel {channel_id}: {e}")
 
     except websockets.exceptions.ConnectionClosed:
         logging.warning("Extension disconnected.")
     finally:
         state.websocket_client = None
+        state.task_message_buffer.clear()
 
 async def start_websocket_server():
     logging.info(f"Starting WebSocket server on localhost:{args.port}...")
