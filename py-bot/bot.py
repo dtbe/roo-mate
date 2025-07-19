@@ -1,6 +1,5 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
 import os
 from dotenv import load_dotenv
 import asyncio
@@ -14,14 +13,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- Load Environment Variables ---
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OWNER_ID = os.getenv("OWNER_ID")
-TESTING_CHANNEL_ID = os.getenv("TESTING_CHANNEL_ID")
-GUILD_ID = os.getenv("GUILD_ID")
+# The only channel the bot will listen to for messages and commands.
+TESTING_CHANNEL_ID = os.getenv("TESTING_CHANNEL_ID") 
 
 # --- State Management ---
 class BotState:
     def __init__(self):
-        self.active_task_channel_id = None
         self.websocket_client = None
         self.websocket_server = None
 
@@ -32,18 +29,7 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 
-class MyBot(commands.Bot):
-    def __init__(self, guild_id):
-        super().__init__(command_prefix="!unused!", intents=intents)
-        self.guild_id = guild_id
-
-    async def setup_hook(self):
-        guild = discord.Object(id=self.guild_id)
-        self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        logging.info(f"Slash commands synced to guild {self.guild_id}.")
-
-bot = MyBot(guild_id=int(GUILD_ID))
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- Helper Functions ---
 async def send_long_message(channel, text):
@@ -59,60 +45,59 @@ async def send_long_message(channel, text):
 @bot.event
 async def on_ready():
     logging.info(f'Logged in as {bot.user.name} (ID: {bot.user.id})')
+    logging.info(f'Listening only in channel: {TESTING_CHANNEL_ID}')
     logging.info('------')
 
 @bot.event
 async def on_message(message):
+    # Ignore messages from the bot itself or from any other channel
     if message.author.bot or str(message.channel.id) != TESTING_CHANNEL_ID:
         return
 
-    logging.info(f"Message from {message.author.name}: '{message.content}'")
+    # Let the library process any potential commands first
+    await bot.process_commands(message)
 
-    if state.websocket_client:
-        # If there's an active task in this channel, continue it. Otherwise, start a new one.
-        is_new_task = state.active_task_channel_id != message.channel.id
-        
-        logging.info(f"Forwarding message to WebSocket. New task: {is_new_task}")
-        payload = {
-            "type": "message",
-            "content": message.content,
-            "channelId": str(message.channel.id),
-            "new_task": is_new_task # Custom flag for roo-lay to interpret
-        }
-        await state.websocket_client.send(json.dumps(payload))
-        state.active_task_channel_id = message.channel.id # Set this channel as having an active task
-    else:
-        logging.warning("Cannot forward message: WebSocket is not connected.")
+    # If it's not a command, handle it as a regular message
+    if not message.content.startswith(bot.command_prefix):
+        logging.info(f"Message from {message.author.name}: '{message.content}'")
+
+        if state.websocket_client:
+            logging.info("Forwarding message to WebSocket.")
+            payload = {
+                "type": "message",
+                "content": message.content,
+                "channelId": str(message.channel.id)
+                # No 'new_task' flag needed. The external service will manage context.
+            }
+            await state.websocket_client.send(json.dumps(payload))
+        else:
+            logging.warning("Cannot forward message: WebSocket is not connected.")
 
 # --- Bot Commands ---
-@bot.tree.command(name="shutdown", description="Shuts down the bot (Owner only).")
-@app_commands.check(lambda i: str(i.user.id) == OWNER_ID)
-async def shutdown_command(interaction: discord.Interaction):
-    await interaction.response.send_message("Shutting down...", ephemeral=True)
+@bot.command(name="shutdown")
+async def shutdown_command(ctx):
+    """Shuts down the bot."""
+    await ctx.send("Shutting down...")
     if state.websocket_server:
         state.websocket_server.close()
         await state.websocket_server.wait_closed()
     await bot.close()
 
-@bot.tree.command(name="new", description="Starts a new task.")
-async def new_task_command(interaction: discord.Interaction):
-    if str(interaction.channel_id) != TESTING_CHANNEL_ID:
-        await interaction.response.send_message("This command can only be used in the designated testing channel.", ephemeral=True)
-        return
-
+@bot.command(name="new")
+async def new_task_command(ctx):
+    """Signals the external service to start a new task."""
     if state.websocket_client:
-        logging.info("Clearing active task and sending 'new' command to WebSocket client.")
-        state.active_task_channel_id = None # Clear the active task
+        logging.info("Sending 'new' command to WebSocket client.")
         payload = {
             "type": "command",
             "command": "new",
-            "channelId": str(interaction.channel_id)
+            "channelId": str(ctx.channel.id)
         }
         await state.websocket_client.send(json.dumps(payload))
-        await interaction.response.send_message("🚀 New task started!", ephemeral=True)
+        await ctx.send("🚀 New task context started!", delete_after=10)
     else:
         logging.warning("Cannot start new task: WebSocket is not connected.")
-        await interaction.response.send_message("Cannot start a new task.", ephemeral=True)
+        await ctx.send("Cannot start a new task.")
 
 # --- WebSocket Logic ---
 def format_and_filter_message(data):
@@ -161,14 +146,6 @@ async def websocket_handler(websocket):
             logging.info(f"Received message from WebSocket: {message}")
             data = json.loads(message)
             
-            # When a task is created, store its channel ID
-            if data.get('eventName') == 'taskCreated':
-                task_id = data.get('data', {}).get('taskId')
-                channel_id = data.get('channelId')
-                if task_id and channel_id:
-                    state.active_task_channel_id = int(channel_id)
-                    logging.info(f"Task {task_id} started in channel {channel_id}.")
-
             formatted_content = format_and_filter_message(data)
             
             if formatted_content:
@@ -187,7 +164,6 @@ async def websocket_handler(websocket):
         logging.warning("Extension disconnected.")
     finally:
         state.websocket_client = None
-        state.active_task_channel_id = None
 
 async def start_websocket_server():
     logging.info("Starting WebSocket server on localhost:8080...")
@@ -199,8 +175,8 @@ async def start_websocket_server():
 
 # --- Main Execution ---
 async def main():
-    if not all([DISCORD_TOKEN, OWNER_ID, TESTING_CHANNEL_ID, GUILD_ID]):
-        logging.error("One or more required environment variables are missing.")
+    if not all([DISCORD_TOKEN, TESTING_CHANNEL_ID]):
+        logging.error("DISCORD_TOKEN and TESTING_CHANNEL_ID must be set in the .env file.")
         return
 
     async with bot:
