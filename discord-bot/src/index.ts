@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, Message, Interaction, TextChannel, EmbedBuilder, MessageFlags, Partials, ChannelType } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Message, Interaction, TextChannel, EmbedBuilder, MessageFlags } from 'discord.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import { URLSearchParams } from 'url';
 import * as dotenv from 'dotenv';
@@ -17,15 +17,7 @@ if (!DISCORD_TOKEN || !PUBLIC_CHANNEL_ID || !PRIVATE_CHANNEL_ID) {
 const ALLOWED_CHANNELS = [PUBLIC_CHANNEL_ID, PRIVATE_CHANNEL_ID];
 
 // --- Discord & WebSocket Clients ---
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages
-    ],
-    partials: [Partials.Channel] // Required for DM channels
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 const wss = new WebSocketServer({ port: WEBSOCKET_PORT });
 
 // --- State Management ---
@@ -196,43 +188,12 @@ function broadcastToActiveClient(data: any) {
 client.once(Events.ClientReady, c => console.log(`🤖 Logged in as ${c.user.tag}`));
 
 client.on(Events.MessageCreate, msg => {
-    if (msg.author.bot) return;
-
-    const isDM = !msg.guild;
-    if (!isDM && !ALLOWED_CHANNELS.includes(msg.channel.id)) return;
-
-    let header;
-    if (isDM) {
-        header = `
-#DIRECT MESSAGE CONVERSATION:
-[You are in a private DM with @${msg.author.username}. Your messages are relayed via a Discord bot. Only the output from 'ask_followup_question' and 'attempt_completion' tools will be sent back to the user. All other tools can be used, but their output will not be visible in Discord.]
----
-`;
-    } else {
-        header = `
-#GROUP CHANNEL CONVERSATION:
-[This is a shared channel. Your messages are relayed via a Discord bot. Messages will be prefixed with the sender's username. Address users by name. Only the output from 'ask_followup_question' and 'attempt_completion' tools will be sent back to the channel. All other tools can be used, but their output will not be visible in Discord. Keep content SFW.]
----
-`;
-    }
-
-    const messageContent = `${header}msg from @${msg.author.username}: '${msg.content}'`;
-    const conversationId = isDM ? msg.author.id : msg.channel.id;
-
-    broadcastToActiveClient({
-        type: 'message',
-        content: messageContent,
-        channelId: msg.channel.id,
-        authorId: msg.author.id,
-        conversationId: conversationId,
-        isDM: isDM
-    });
+    if (msg.author.bot || !ALLOWED_CHANNELS.includes(msg.channel.id)) return;
+    broadcastToActiveClient({ type: 'message', content: msg.content, channelId: msg.channel.id });
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-    const isDMInteraction = !interaction.guild;
-    if (!isDMInteraction && !ALLOWED_CHANNELS.includes(interaction.channelId)) return;
+    if (!interaction.isChatInputCommand() || !ALLOWED_CHANNELS.includes(interaction.channelId)) return;
     const { commandName, options, channelId } = interaction;
 
     if (commandName === 'reset' || commandName === 'new' || commandName === 'stop') {

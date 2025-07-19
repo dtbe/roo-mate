@@ -178,37 +178,39 @@ class WebSocketClient {
 
     private async handleDiscordMessage(message: any): Promise<void> {
         if (!this.rooCodeApi) return;
-        const { type, command, content, channelId, conversationId } = message;
-        if (!conversationId) return;
+        const { type, command, content, channelId } = message;
+        if (!channelId) return;
 
         if (type === 'command' && (command === 'reset' || command === 'stop' || command === 'new')) {
+            // Acknowledge immediately to prevent Discord timeout
             this.sendToDiscord({ type: 'ack', command: command, channelId });
 
             try {
-                const currentTaskId = globalState.activeTaskIds.get(conversationId);
+                const currentTaskId = globalState.activeTaskIds.get(channelId);
                 if (currentTaskId) {
                     await this.rooCodeApi.cancelCurrentTask();
-                    globalState.activeTaskIds.delete(conversationId);
+                    // Clear task mappings after cancellation
+                    globalState.activeTaskIds.delete(channelId);
                     globalState.channelIdByTaskId.delete(currentTaskId);
                 }
             } catch (error) {
                 console.error(`[roo-lay] Error during cancelCurrentTask for command '${command}'.`, error);
             }
         } else if (type === 'message' && content) {
-            const currentTaskId = globalState.activeTaskIds.get(conversationId);
+            const currentTaskId = globalState.activeTaskIds.get(channelId);
             if (currentTaskId) {
                 await this.rooCodeApi.sendMessage(content);
             } else {
-                await this.startNewTaskForConversation(channelId, conversationId, content);
+                await this.startNewTaskForChannel(channelId, content);
             }
         }
     }
 
-    private async startNewTaskForConversation(channelId: string, conversationId: string, text: string): Promise<void> {
+    private async startNewTaskForChannel(channelId: string, text: string): Promise<void> {
         if (!this.rooCodeApi) return;
         try {
             const newTaskId = await this.rooCodeApi.startNewTask({ text });
-            globalState.activeTaskIds.set(conversationId, newTaskId);
+            globalState.activeTaskIds.set(channelId, newTaskId);
             globalState.channelIdByTaskId.set(newTaskId, channelId);
         } catch (error) {
             console.error('[roo-lay] Failed to start new task:', error);

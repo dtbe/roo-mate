@@ -57,7 +57,7 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
         type: ApplicationCommandType.ChatInput,
     },
     {
-        name: 'save-to-kb',
+        name: 'save',
         description: 'Saves a piece of information to the knowledge base for intelligent assimilation.',
         type: ApplicationCommandType.ChatInput,
         options: [
