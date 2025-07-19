@@ -70,12 +70,15 @@ async def on_message(message):
         logging.info(f"Message from {message.author.name}: '{message.content}'")
 
         if state.websocket_client:
-            logging.info("Forwarding message to WebSocket.")
+            logging.info("Formatting and forwarding message to WebSocket.")
+            
+            # Prepend the username to the message content for multi-user context
+            formatted_content = f"#{message.author.display_name}: {message.content}"
+            
             payload = {
                 "type": "message",
-                "content": message.content,
+                "content": formatted_content,
                 "channelId": str(message.channel.id)
-                # No 'new_task' flag needed. The external service will manage context.
             }
             await state.websocket_client.send(json.dumps(payload))
         else:
