@@ -7,5 +7,4 @@ package-lock.json
 node_modules/
 dist/
 
-.vscode/
 mcp.json
